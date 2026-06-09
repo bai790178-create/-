@@ -15,6 +15,10 @@ class AnalysisResult(object):
         profile=None,
         orientation="vertical",
         message="",
+        raw_spacing_px=None,
+        stable_spacing_px=None,
+        roi_count=0,
+        used_bright_intervals=None,
     ):
         self.stripe_spacing_px = stripe_spacing_px
         self.stripe_spacing_um = stripe_spacing_um
@@ -26,6 +30,10 @@ class AnalysisResult(object):
         self.profile = profile or []
         self.orientation = orientation
         self.message = message
+        self.raw_spacing_px = raw_spacing_px
+        self.stable_spacing_px = stable_spacing_px
+        self.roi_count = roi_count
+        self.used_bright_intervals = used_bright_intervals or []
 
     def to_dict(self):
         return {
@@ -39,6 +47,10 @@ class AnalysisResult(object):
             "orientation": self.orientation,
             "message": self.message,
             "profile": self.profile,
+            "raw_spacing_px": self.raw_spacing_px,
+            "stable_spacing_px": self.stable_spacing_px,
+            "roi_count": self.roi_count,
+            "used_bright_intervals": self.used_bright_intervals,
         }
 
 
@@ -114,9 +126,7 @@ class StripeAnalyzer(object):
             if gray.size == 0:
                 return AnalysisResult(status="need_roi", message="有效分析区域为空。")
 
-            if cv2 is not None:
-                gray = cv2.GaussianBlur(gray, (5, 5), 0)
-                gray = cv2.equalizeHist(gray)
+            gray = self._prepare_gray(gray)
 
             vertical = self._analyze_projection(gray, axis=0, orientation="vertical", pixel_scale=pixel_scale)
             horizontal = self._analyze_projection(gray, axis=1, orientation="horizontal", pixel_scale=pixel_scale)
@@ -158,15 +168,72 @@ class StripeAnalyzer(object):
             return gray
         return gray[int(h * 0.12) : int(h * 0.88), int(w * 0.08) : int(w * 0.92)]
 
+    def _prepare_gray(self, gray):
+        np = self.np
+        cv2 = self.cv2
+        if cv2 is None:
+            return self._normalize(gray.astype(float))
+
+        gray8 = gray.astype(np.uint8)
+        sigma = max(8.0, min(gray8.shape[:2]) / 36.0)
+        background = cv2.GaussianBlur(gray8, (0, 0), sigma)
+        flattened = np.clip(gray8.astype(float) - background.astype(float) + 128.0, 0, 255).astype(np.uint8)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(flattened)
+        return cv2.GaussianBlur(enhanced, (3, 3), 0)
+
     def _analyze_projection(self, gray, axis, orientation, pixel_scale):
         np = self.np
-        profile = gray.mean(axis=axis)
-        smooth = self._smooth(profile)
-        norm = self._normalize(smooth)
+        bands = self._projection_bands(gray, axis)
+        stats = []
+        for profile, band_center_distance in bands:
+            norm_profile = self._normalize(self._smooth(profile))
+            clarity = self._clarity(norm_profile)
+            period, corr = self._estimate_period(norm_profile)
+            if period is not None and corr >= 0.12 and clarity >= 0.12:
+                stats.append({
+                    "profile": norm_profile,
+                    "period": period,
+                    "corr": corr,
+                    "clarity": clarity,
+                    "band_center_distance": band_center_distance,
+                })
+
+        master_period = self._weighted_period(stats)
+        selected = []
+        if master_period is not None:
+            selected = [
+                item
+                for item in stats
+                if master_period * 0.65 <= item["period"] <= master_period * 1.35
+            ]
+        if not selected:
+            full_profile = gray.mean(axis=axis)
+            norm = self._normalize(self._smooth(full_profile))
+            selected = [{
+                "profile": norm,
+                "period": master_period,
+                "corr": 0.0,
+                "clarity": self._clarity(norm),
+                "band_center_distance": 0.0,
+            }]
+
+        weights = np.array([
+            max(0.05, item["corr"] * 0.65 + item["clarity"] * 0.35) for item in selected
+        ], dtype=float)
+        profiles = np.array([item["profile"] for item in selected], dtype=float)
+        combined = np.average(profiles, axis=0, weights=weights)
+        norm = self._normalize(self._smooth(combined))
         clarity = self._clarity(norm)
-        period, corr = self._autocorrelation_period(norm)
-        bright = self._peak_spacing(norm, kind="bright", expected_period=period, sample_count=5)
-        dark = self._peak_spacing(norm, kind="dark", expected_period=period)
+        period, corr = self._estimate_period(norm)
+        if master_period is not None:
+            period = master_period if period is None else (master_period * 0.65 + period * 0.35)
+            corr = max(corr, max(item["corr"] for item in selected))
+
+        bright_info = self._peak_spacing_details(norm, kind="bright", expected_period=period, sample_count=5)
+        dark_info = self._peak_spacing_details(norm, kind="dark", expected_period=period)
+        bright = bright_info["spacing"] if bright_info else None
+        dark = dark_info["spacing"] if dark_info else None
 
         spacing = None
         if bright is not None:
@@ -200,7 +267,36 @@ class StripeAnalyzer(object):
             status="ok" if spacing is not None else "no_stripe",
             profile=[self._round(float(v)) for v in norm.tolist()],
             orientation=orientation,
+            roi_count=len(selected),
+            used_bright_intervals=[self._round(v) for v in (bright_info["intervals"] if bright_info else [])],
         )
+
+    def _projection_bands(self, gray, axis):
+        np = self.np
+        h, w = gray.shape[:2]
+        bands = []
+        if axis == 0:
+            length = h
+            width = max(12, int(length * 0.22))
+            centers = np.linspace(length * 0.18, length * 0.82, 7)
+            for center in centers:
+                start = max(0, int(center - width / 2))
+                end = min(h, int(center + width / 2))
+                if end - start >= 8:
+                    bands.append((gray[start:end, :].mean(axis=0), abs(center - length / 2.0) / max(length, 1)))
+        else:
+            length = w
+            width = max(12, int(length * 0.22))
+            centers = np.linspace(length * 0.18, length * 0.82, 7)
+            for center in centers:
+                start = max(0, int(center - width / 2))
+                end = min(w, int(center + width / 2))
+                if end - start >= 8:
+                    bands.append((gray[:, start:end].mean(axis=1), abs(center - length / 2.0) / max(length, 1)))
+
+        if not bands:
+            bands.append((gray.mean(axis=axis), 0.0))
+        return bands
 
     def _smooth(self, profile):
         np = self.np
@@ -225,6 +321,31 @@ class StripeAnalyzer(object):
         gradient = float(np.mean(np.abs(np.diff(profile))))
         return max(0.0, min(1.0, contrast * 0.65 + min(gradient * 8.0, 1.0) * 0.35))
 
+    def _estimate_period(self, profile):
+        ac_period, ac_score = self._autocorrelation_period(profile)
+        fft_period, fft_score = self._frequency_period(profile)
+        if ac_period is not None and fft_period is not None:
+            agreement = abs(ac_period - fft_period) / max(ac_period, fft_period, 1.0)
+            if agreement <= 0.28:
+                period = (ac_period * ac_score + fft_period * fft_score) / max(ac_score + fft_score, 1e-6)
+                return period, max(ac_score, fft_score)
+        if fft_period is not None and fft_score > ac_score:
+            return fft_period, fft_score
+        return ac_period, ac_score
+
+    def _weighted_period(self, stats):
+        if not stats:
+            return None
+        np = self.np
+        periods = np.array([item["period"] for item in stats], dtype=float)
+        median = float(np.median(periods))
+        usable = [item for item in stats if median * 0.65 <= item["period"] <= median * 1.35]
+        if not usable:
+            return median
+        weights = np.array([max(0.05, item["corr"] * item["clarity"]) for item in usable], dtype=float)
+        values = np.array([item["period"] for item in usable], dtype=float)
+        return float(np.average(values, weights=weights))
+
     def _autocorrelation_period(self, profile):
         np = self.np
         values = profile - float(np.mean(profile))
@@ -233,7 +354,7 @@ class StripeAnalyzer(object):
 
         best_lag = None
         best_corr = -1.0
-        for lag in range(8, min(int(len(values) / 2), 260) + 1):
+        for lag in range(6, min(int(len(values) / 2), 260) + 1):
             left = values[:-lag]
             right = values[lag:]
             denom = math.sqrt(float(np.dot(left, left)) * float(np.dot(right, right)))
@@ -243,11 +364,38 @@ class StripeAnalyzer(object):
                 best_lag = lag
         return best_lag, max(0.0, min(1.0, best_corr))
 
+    def _frequency_period(self, profile):
+        np = self.np
+        values = profile - float(np.mean(profile))
+        if len(values) < 24 or float(np.std(values)) < 1e-6:
+            return None, 0.0
+        windowed = values * np.hanning(len(values))
+        spectrum = np.abs(np.fft.rfft(windowed))
+        if len(spectrum) < 4:
+            return None, 0.0
+        spectrum[:2] = 0.0
+        indexes = np.arange(len(spectrum), dtype=float)
+        valid = indexes > 0
+        periods = np.zeros_like(indexes)
+        periods[valid] = len(values) / indexes[valid]
+        valid = (periods >= 6.0) & (periods <= min(220.0, len(values) / 2.0))
+        if not np.any(valid):
+            return None, 0.0
+        valid_indices = np.where(valid)[0]
+        peak_index = int(valid_indices[np.argmax(spectrum[valid])])
+        total = float(np.sum(spectrum[valid])) + 1e-9
+        score = float(spectrum[peak_index]) / total
+        return float(len(values) / peak_index), max(0.0, min(1.0, score * 8.0))
+
     def _peak_spacing(self, profile, kind, expected_period=None, sample_count=None):
+        details = self._peak_spacing_details(profile, kind, expected_period, sample_count)
+        return None if details is None else details["spacing"]
+
+    def _peak_spacing_details(self, profile, kind, expected_period=None, sample_count=None):
         np = self.np
         values = profile if kind == "bright" else 1.0 - profile
-        threshold = float(np.mean(values) + np.std(values) * 0.25)
-        min_distance = int(max(6, (expected_period or len(values) / 20.0) * 0.45))
+        threshold = float(np.mean(values) + np.std(values) * 0.18)
+        min_distance = int(max(5, (expected_period or len(values) / 20.0) * 0.55))
 
         peaks = []
         last_peak = -min_distance
@@ -255,6 +403,9 @@ class StripeAnalyzer(object):
             if values[idx] <= threshold:
                 continue
             if not (values[idx] >= values[idx - 1] and values[idx] >= values[idx + 1]):
+                continue
+            prominence = values[idx] - max(min(values[idx - 2], values[idx - 1]), min(values[idx + 1], values[idx + 2]))
+            if prominence < max(0.015, float(np.std(values)) * 0.04):
                 continue
             if idx - last_peak < min_distance:
                 if peaks and values[idx] > values[peaks[-1]]:
@@ -266,26 +417,39 @@ class StripeAnalyzer(object):
 
         if len(peaks) < 2:
             return None
+        refined_peaks = []
+        for peak in peaks:
+            if 0 < peak < len(values) - 1:
+                left = float(values[peak - 1])
+                center_value = float(values[peak])
+                right = float(values[peak + 1])
+                denom = left - 2.0 * center_value + right
+                offset = 0.0 if abs(denom) < 1e-9 else 0.5 * (left - right) / denom
+                offset = max(-0.5, min(0.5, offset))
+                refined_peaks.append(float(peak) + offset)
+            else:
+                refined_peaks.append(float(peak))
+
         spacing_items = []
         center = len(values) / 2.0
-        for i in range(1, len(peaks)):
-            spacing = peaks[i] - peaks[i - 1]
-            midpoint = (peaks[i] + peaks[i - 1]) / 2.0
+        for i in range(1, len(refined_peaks)):
+            spacing = refined_peaks[i] - refined_peaks[i - 1]
+            midpoint = (refined_peaks[i] + refined_peaks[i - 1]) / 2.0
             spacing_items.append((spacing, abs(midpoint - center)))
 
         if expected_period:
             spacing_items = [
-                item for item in spacing_items if expected_period * 0.45 <= item[0] <= expected_period * 1.65
+                item for item in spacing_items if expected_period * 0.65 <= item[0] <= expected_period * 1.45
             ]
         if not spacing_items:
             return None
         if sample_count:
             spacing_items = sorted(spacing_items, key=lambda item: item[1])[:sample_count]
             spacings = [item[0] for item in spacing_items]
-            return float(np.mean(np.array(spacings, dtype=float)))
+            return {"spacing": float(np.mean(np.array(spacings, dtype=float))), "intervals": spacings}
 
         spacings = [item[0] for item in spacing_items]
-        return float(np.median(np.array(spacings, dtype=float)))
+        return {"spacing": float(np.median(np.array(spacings, dtype=float))), "intervals": spacings}
 
     def _round(self, value):
         return None if value is None else round(float(value), 3)

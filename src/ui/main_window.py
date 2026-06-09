@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from collections import deque
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap
@@ -44,6 +45,8 @@ class MainWindow(QMainWindow):
         self.realtime_enabled = False
         self.last_analysis_ms = 0
         self.available_cameras = []
+        self.realtime_results = deque(maxlen=7)
+        self.stable_spacing_px = None
 
         self.setWindowTitle("超声光栅实验辅助平台")
         self.resize(1420, 900)
@@ -311,6 +314,7 @@ class MainWindow(QMainWindow):
             self.camera_worker = None
         self.camera_status.setText("相机状态：已关闭")
         self.realtime_enabled = False
+        self._reset_realtime_smoothing()
         self.realtime_btn.setText("开始实时分析")
         self._log("相机已关闭。")
 
@@ -322,7 +326,7 @@ class MainWindow(QMainWindow):
             ms = int(datetime.now().timestamp() * 1000)
             if ms - self.last_analysis_ms >= 400:
                 self.last_analysis_ms = ms
-                self.analyze_current_frame(silent=True)
+                self.analyze_current_frame(silent=True, realtime=True)
 
     def on_camera_error(self, message):
         self.camera_status.setText("相机状态：错误")
@@ -358,12 +362,14 @@ class MainWindow(QMainWindow):
         self._display_result(result)
         self._log("已导入图像：{}".format(os.path.basename(path)))
 
-    def analyze_current_frame(self, silent=False):
+    def analyze_current_frame(self, silent=False, realtime=False):
         if self.current_frame is None:
             if not silent:
                 self._log("当前没有可分析图像。")
             return
         result = self.analyzer.analyze_frame(self.current_frame, self._analysis_options())
+        if realtime:
+            result = self._stabilize_realtime_result(result)
         self._display_result(result)
         if not silent:
             self._log("已完成当前图像分析。")
@@ -371,6 +377,7 @@ class MainWindow(QMainWindow):
     def toggle_realtime_analysis(self):
         self.realtime_enabled = not self.realtime_enabled
         if self.realtime_enabled:
+            self._reset_realtime_smoothing()
             self.realtime_btn.setText("停止实时分析")
             self.analysis_status.setText("分析：实时")
             self._log("实时分析已启动，默认每 400ms 分析一帧。")
@@ -378,6 +385,43 @@ class MainWindow(QMainWindow):
             self.realtime_btn.setText("开始实时分析")
             self.analysis_status.setText("分析：待机")
             self._log("实时分析已停止。")
+
+    def _reset_realtime_smoothing(self):
+        self.realtime_results.clear()
+        self.stable_spacing_px = None
+
+    def _stabilize_realtime_result(self, result):
+        if result.stripe_spacing_px is None or result.confidence < 0.35:
+            if self.stable_spacing_px is not None:
+                result.raw_spacing_px = result.stripe_spacing_px
+                result.stable_spacing_px = self.stable_spacing_px
+                result.stripe_spacing_px = self.stable_spacing_px
+                result.stripe_spacing_um = self._round_result_um(self.stable_spacing_px)
+                result.status = "hold"
+                result.message = "低置信度帧，保持上一稳定值。"
+            return result
+
+        raw_spacing = float(result.stripe_spacing_px)
+        result.raw_spacing_px = raw_spacing
+        self.realtime_results.append(raw_spacing)
+        values = sorted(self.realtime_results)
+        median = values[len(values) // 2]
+
+        if self.stable_spacing_px is None:
+            self.stable_spacing_px = median
+        else:
+            if abs(raw_spacing - self.stable_spacing_px) / max(self.stable_spacing_px, 1.0) > 0.28:
+                median = self.stable_spacing_px
+            self.stable_spacing_px = self.stable_spacing_px * 0.72 + median * 0.28
+
+        result.stable_spacing_px = round(self.stable_spacing_px, 3)
+        result.stripe_spacing_px = result.stable_spacing_px
+        result.stripe_spacing_um = self._round_result_um(self.stable_spacing_px)
+        return result
+
+    def _round_result_um(self, spacing_px):
+        pixel_scale = self._float_value(self.pixel_scale.text(), 1.0)
+        return round(float(spacing_px) * pixel_scale, 3)
 
     def save_experiment(self):
         params = self._params()
