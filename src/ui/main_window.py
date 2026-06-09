@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QSizePolicy,
     QSplitter,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -60,45 +61,57 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         central = QWidget()
+        central.setObjectName("mainSurface")
         root = QVBoxLayout(central)
-        root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(12)
+        root.setContentsMargins(18, 16, 18, 18)
+        root.setSpacing(14)
         root.addWidget(self._build_titlebar())
 
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setObjectName("contentSplitter")
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_right_panel())
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
+        splitter.setSizes([980, 390])
         root.addWidget(splitter, 1)
 
         bottom = QSplitter(Qt.Horizontal)
+        bottom.setObjectName("bottomSplitter")
         bottom.addWidget(self._build_scan_panel())
         bottom.addWidget(self._build_log_panel())
         bottom.setStretchFactor(0, 2)
         bottom.setStretchFactor(1, 1)
+        bottom.setSizes([930, 430])
         root.addWidget(bottom)
         self.setCentralWidget(central)
         self._build_menu()
 
     def _build_titlebar(self):
         box = QFrame()
+        box.setObjectName("titleBar")
         layout = QHBoxLayout(box)
-        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(12)
         mark = QLabel("4f")
         mark.setObjectName("titleMark")
-        mark.setFixedSize(44, 44)
+        mark.setFixedSize(48, 48)
         mark.setAlignment(Qt.AlignCenter)
         title = QLabel("超声光栅实验辅助平台")
         title.setObjectName("appTitle")
         subtitle = QLabel("USB 相机采集、条纹中心距识别、实验参数与记录管理")
         subtitle.setObjectName("mutedText")
         title_group = QVBoxLayout()
+        title_group.setSpacing(3)
         title_group.addWidget(title)
         title_group.addWidget(subtitle)
         self.camera_status = QLabel("相机状态：未连接")
         self.resolution_status = QLabel("分辨率：--")
         self.analysis_status = QLabel("分析：待机")
+        for label in (self.camera_status, self.resolution_status, self.analysis_status):
+            label.setObjectName("statusPill")
+            label.setAlignment(Qt.AlignCenter)
+            label.setMinimumWidth(118)
         layout.addWidget(mark)
         layout.addLayout(title_group, 1)
         layout.addWidget(self.camera_status)
@@ -108,7 +121,10 @@ class MainWindow(QMainWindow):
 
     def _build_left_panel(self):
         panel = QGroupBox("图像预览")
+        panel.setObjectName("previewPanel")
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 26, 16, 16)
+        layout.setSpacing(12)
         self.preview_label = QLabel("导入图片或打开 USB 相机")
         self.preview_label.setObjectName("previewLabel")
         self.preview_label.setAlignment(Qt.AlignCenter)
@@ -117,21 +133,33 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.preview_label, 1)
 
         camera_bar = QHBoxLayout()
+        camera_bar.setSpacing(8)
         self.backend_select = QComboBox()
         self.backend_select.addItem("DirectShow", "DSHOW")
         self.backend_select.addItem("Media Foundation", "MSMF")
         self.backend_select.addItem("自动", "ANY")
         self.backend_select.addItem("CK SDK", "CKSDK")
-        camera_bar.addWidget(QLabel("相机选择"))
+        camera_label = QLabel("相机选择")
+        camera_label.setObjectName("fieldLabel")
+        camera_bar.addWidget(camera_label)
         self.camera_select = QComboBox()
         self.camera_select.addItem("相机 0", 0)
         self.refresh_camera_btn = QPushButton("刷新相机")
+        self.refresh_camera_btn.setObjectName("ghostButton")
         camera_bar.addWidget(self.backend_select)
         camera_bar.addWidget(self.camera_select, 1)
         camera_bar.addWidget(self.refresh_camera_btn)
         layout.addLayout(camera_bar)
+        return panel
 
-        actions = QGridLayout()
+    def _build_control_panel(self):
+        panel = QGroupBox("执行控制")
+        panel.setObjectName("controlPanel")
+        layout = QGridLayout(panel)
+        layout.setContentsMargins(14, 26, 14, 14)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(10)
+
         self.open_camera_btn = QPushButton("打开相机")
         self.stop_camera_btn = QPushButton("关闭相机")
         self.capture_btn = QPushButton("拍照")
@@ -139,22 +167,43 @@ class MainWindow(QMainWindow):
         self.demo_btn = QPushButton("载入示意图")
         self.realtime_btn = QPushButton("开始实时分析")
         self.save_btn = QPushButton("保存实验")
-        actions.addWidget(self.open_camera_btn, 0, 0)
-        actions.addWidget(self.stop_camera_btn, 0, 1)
-        actions.addWidget(self.capture_btn, 0, 2)
-        actions.addWidget(self.import_btn, 1, 0)
-        actions.addWidget(self.demo_btn, 1, 1)
-        actions.addWidget(self.realtime_btn, 1, 2)
-        actions.addWidget(self.save_btn, 2, 0, 1, 3)
-        layout.addLayout(actions)
+        self.open_camera_btn.setObjectName("primaryButton")
+        self.realtime_btn.setObjectName("primaryButton")
+        self.save_btn.setObjectName("accentButton")
+        self.stop_camera_btn.setObjectName("secondaryButton")
+        self.capture_btn.setObjectName("secondaryButton")
+        self.import_btn.setObjectName("secondaryButton")
+        self.demo_btn.setObjectName("secondaryButton")
+        self._decorate_button(self.open_camera_btn, QStyle.SP_MediaPlay)
+        self._decorate_button(self.stop_camera_btn, QStyle.SP_MediaStop)
+        self._decorate_button(self.capture_btn, QStyle.SP_DialogYesButton)
+        self._decorate_button(self.import_btn, QStyle.SP_DialogOpenButton)
+        self._decorate_button(self.demo_btn, QStyle.SP_FileDialogDetailedView)
+        self._decorate_button(self.realtime_btn, QStyle.SP_BrowserReload)
+        self._decorate_button(self.save_btn, QStyle.SP_DialogSaveButton)
+
+        layout.addWidget(self.open_camera_btn, 0, 0)
+        layout.addWidget(self.stop_camera_btn, 0, 1)
+        layout.addWidget(self.capture_btn, 0, 2)
+        layout.addWidget(self.import_btn, 1, 0)
+        layout.addWidget(self.demo_btn, 1, 1)
+        layout.addWidget(self.realtime_btn, 1, 2)
+        layout.addWidget(self.analyze_btn, 2, 0, 1, 2)
+        layout.addWidget(self.save_btn, 2, 2)
         return panel
 
     def _build_right_panel(self):
         panel = QWidget()
+        panel.setObjectName("sidePanel")
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
         params = QGroupBox("实验参数")
+        params.setObjectName("paramsPanel")
         form = QFormLayout(params)
+        form.setContentsMargins(14, 24, 14, 14)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
         self.analysis_type = QComboBox()
         self.analysis_type.addItems(["光栅条纹分析", "频率稳定性估算", "材料状态评估"])
         self.pixel_scale = QLineEdit("0.65")
@@ -175,13 +224,23 @@ class MainWindow(QMainWindow):
         form.addRow("观测时间 (min)", self.duration)
         form.addRow("实验备注", self.notes)
         results = QGroupBox("分析结果")
+        results.setObjectName("resultsPanel")
         result_layout = QFormLayout(results)
+        result_layout.setContentsMargins(14, 24, 14, 14)
+        result_layout.setHorizontalSpacing(12)
+        result_layout.setVerticalSpacing(10)
         self.result_spacing = QLabel("--")
+        self.result_spacing.setObjectName("heroResult")
+        self.result_spacing.setAlignment(Qt.AlignCenter)
+        self.result_spacing.setMinimumHeight(52)
         self.result_bright = QLabel("--")
         self.result_dark = QLabel("--")
         self.result_clarity = QLabel("--")
         self.result_confidence = QLabel("--")
         self.result_state = QLabel("待机")
+        self.result_state.setWordWrap(True)
+        for label in (self.result_bright, self.result_dark, self.result_clarity, self.result_confidence, self.result_state):
+            label.setObjectName("resultValue")
         result_layout.addRow("条纹中心距", self.result_spacing)
         result_layout.addRow("亮纹中心距", self.result_bright)
         result_layout.addRow("暗纹中心距", self.result_dark)
@@ -189,15 +248,20 @@ class MainWindow(QMainWindow):
         result_layout.addRow("置信度", self.result_confidence)
         result_layout.addRow("状态", self.result_state)
         self.analyze_btn = QPushButton("分析当前图像")
-        layout.addWidget(params)
-        layout.addWidget(self.analyze_btn)
+        self.analyze_btn.setObjectName("accentButton")
+        self._decorate_button(self.analyze_btn, QStyle.SP_ComputerIcon)
+        self._decorate_button(self.refresh_camera_btn, QStyle.SP_BrowserReload)
         layout.addWidget(results)
+        layout.addWidget(params)
+        layout.addWidget(self._build_control_panel())
         layout.addStretch(1)
         return panel
 
     def _build_scan_panel(self):
         panel = QGroupBox("中心/ROI 强度扫描")
+        panel.setObjectName("scanPanel")
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 24, 14, 14)
         self.scan_label = QLabel("导入图像后显示投影曲线")
         self.scan_label.setObjectName("scanLabel")
         self.scan_label.setMinimumHeight(170)
@@ -207,8 +271,11 @@ class MainWindow(QMainWindow):
 
     def _build_log_panel(self):
         panel = QGroupBox("运行日志")
+        panel.setObjectName("logPanel")
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 24, 14, 14)
         self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
         self.log_view.setMinimumHeight(170)
         layout.addWidget(self.log_view)
@@ -235,21 +302,187 @@ class MainWindow(QMainWindow):
         self.refresh_camera_btn.clicked.connect(self.refresh_cameras)
         self.backend_select.currentIndexChanged.connect(self.refresh_cameras)
 
+    def _decorate_button(self, button, standard_pixmap):
+        button.setIcon(self.style().standardIcon(standard_pixmap))
+        button.setCursor(Qt.PointingHandCursor)
+
     def _apply_style(self):
         self.setStyleSheet(
             """
-            QWidget { font-family: "Microsoft YaHei UI", "Segoe UI"; font-size: 14px; color: #172231; }
-            QMainWindow, QWidget { background: #eef3f8; }
-            QGroupBox, QFrame { background: rgba(255,255,255,0.94); border: 1px solid #cbd6e2; border-radius: 8px; margin-top: 8px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; font-weight: 700; }
-            QPushButton { min-height: 34px; border: 1px solid #9eb2c7; border-radius: 6px; background: #2f90ea; color: white; font-weight: 700; padding: 6px 10px; }
-            QPushButton:hover { background: #237dd0; }
-            QLineEdit, QComboBox, QPlainTextEdit { background: white; border: 1px solid #b8c6d6; border-radius: 6px; padding: 6px; }
-            #titleMark { background: #2786e2; color: white; font-weight: 700; border-radius: 8px; }
-            #appTitle { font-size: 21px; font-weight: 700; }
-            #mutedText { color: #64748b; }
-            #previewLabel { background: #060606; color: #dce6f2; border-radius: 8px; }
-            #scanLabel { background: #0b1220; color: #dce6f2; border-radius: 8px; }
+            QWidget {
+                font-family: "Microsoft YaHei UI", "Segoe UI";
+                font-size: 14px;
+                color: #17313d;
+            }
+            QMainWindow, #mainSurface {
+                background: #f4f8fa;
+            }
+            QMenuBar {
+                background: #f4f8fa;
+                color: #17313d;
+                padding: 4px 8px;
+            }
+            QMenuBar::item {
+                background: transparent;
+                border-radius: 5px;
+                padding: 5px 10px;
+            }
+            QMenuBar::item:selected {
+                background: #d8edf1;
+            }
+            QGroupBox {
+                background: #ffffff;
+                border: 1px solid #cfdde2;
+                border-radius: 8px;
+                margin-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 14px;
+                padding: 0 8px;
+                color: #0f6572;
+                font-weight: 700;
+            }
+            #titleBar {
+                background: #0e1b24;
+                border: 1px solid #1d4653;
+                border-radius: 8px;
+                margin-top: 0;
+            }
+            #titleMark {
+                background: #20a6b8;
+                color: white;
+                font-size: 18px;
+                font-weight: 800;
+                border-radius: 8px;
+            }
+            #appTitle {
+                color: #eefcff;
+                font-size: 22px;
+                font-weight: 800;
+            }
+            #mutedText {
+                color: #99b8c0;
+            }
+            #fieldLabel {
+                color: #435a64;
+                font-weight: 700;
+            }
+            #statusPill {
+                background: #132d38;
+                border: 1px solid #20a6b8;
+                border-radius: 8px;
+                color: #c9fbff;
+                font-size: 13px;
+                padding: 7px 10px;
+            }
+            QSplitter::handle {
+                background: #cbdde3;
+                border-radius: 2px;
+            }
+            QSplitter::handle:horizontal {
+                width: 8px;
+            }
+            QLineEdit, QComboBox, QPlainTextEdit {
+                background: #fbfdff;
+                border: 1px solid #b9cbd1;
+                border-radius: 6px;
+                padding: 7px 8px;
+                selection-background-color: #20a6b8;
+            }
+            QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {
+                border: 1px solid #20a6b8;
+                background: #ffffff;
+            }
+            QComboBox::drop-down {
+                border: 0;
+                width: 26px;
+            }
+            QPushButton {
+                min-height: 36px;
+                border-radius: 7px;
+                font-weight: 700;
+                padding: 7px 12px;
+            }
+            #primaryButton {
+                background: #1b8fa0;
+                border: 1px solid #126f7d;
+                color: #ffffff;
+            }
+            #primaryButton:hover {
+                background: #157e8d;
+            }
+            #accentButton {
+                background: #e7a83d;
+                border: 1px solid #c88b25;
+                color: #1f2b32;
+            }
+            #accentButton:hover {
+                background: #d89b32;
+            }
+            #secondaryButton, #ghostButton {
+                background: #e9f3f5;
+                border: 1px solid #accbd2;
+                color: #164f5a;
+            }
+            #secondaryButton:hover, #ghostButton:hover {
+                background: #d8edf1;
+            }
+            #previewPanel, #scanPanel {
+                background: #0e1b24;
+                border: 1px solid #1f4c58;
+            }
+            #previewPanel::title, #scanPanel::title {
+                color: #b9f8ff;
+                background: #0e1b24;
+            }
+            #previewLabel {
+                background: #071017;
+                color: #d7f8fb;
+                border: 1px solid #20a6b8;
+                border-radius: 8px;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            #scanLabel {
+                background: #071017;
+                color: #d7f8fb;
+                border: 1px solid #20a6b8;
+                border-radius: 8px;
+                font-weight: 700;
+            }
+            #resultsPanel {
+                background: #0e1b24;
+                border: 1px solid #20a6b8;
+            }
+            #resultsPanel::title {
+                color: #b9f8ff;
+                background: #0e1b24;
+            }
+            #controlPanel {
+                background: #eef5f7;
+                border: 1px solid #c5d7dd;
+            }
+            #logView {
+                background: #f9fcfd;
+                color: #314b59;
+            }
+            #heroResult {
+                background: #071017;
+                border: 1px solid #20a6b8;
+                border-radius: 8px;
+                color: #36d8e8;
+                font-size: 24px;
+                font-weight: 800;
+                padding: 10px;
+            }
+            #resultValue {
+                color: #d7f8fb;
+                font-weight: 700;
+            }
+            #resultsPanel QLabel {
+                color: #d7f8fb;
+            }
             """
         )
 
