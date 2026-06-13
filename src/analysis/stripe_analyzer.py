@@ -100,6 +100,91 @@ class StripeAnalyzer(object):
         image = self.Image.open(path).convert("RGB")
         return self.np.array(image)
 
+    def enhance_frame(self, frame):
+        if not self._ready() or frame is None:
+            return None
+
+        np = self.np
+        cv2 = self.cv2
+        if len(frame.shape) == 2:
+            gray = frame.copy()
+        elif cv2 is not None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = (frame[:, :, 0] * 0.299 + frame[:, :, 1] * 0.587 + frame[:, :, 2] * 0.114).astype(np.uint8)
+
+        enhanced = self._prepare_gray(gray)
+        if enhanced.dtype != np.uint8:
+            enhanced = np.clip(enhanced * 255.0, 0, 255).astype(np.uint8)
+
+        if cv2 is not None:
+            blur = cv2.GaussianBlur(enhanced, (0, 0), 1.1)
+            enhanced = cv2.addWeighted(enhanced, 1.28, blur, -0.28, 0)
+
+        return np.ascontiguousarray(enhanced)
+
+    def calculate_calibrated_contrast(self, stripe_frame, background_frame, dark_frame):
+        if not self._ready():
+            return {"status": "missing_dependency", "message": self._dependency_result().message}
+        if dark_frame is None:
+            return {"status": "missing_dark", "message": "请先拍暗场图。"}
+        if background_frame is None:
+            return {"status": "missing_background", "message": "请先拍背景图。"}
+        if stripe_frame is None:
+            return {"status": "missing_stripe", "message": "请先拍条纹图。"}
+
+        try:
+            dark = self._gray_float(dark_frame)
+            background = self._gray_float(background_frame)
+            stripe = self._gray_float(stripe_frame)
+            if dark.shape != background.shape or dark.shape != stripe.shape:
+                return {"status": "shape_mismatch", "message": "暗场图、背景图和条纹图尺寸不一致。"}
+
+            eps = 1e-6
+            stripe_corr = self.np.maximum(stripe - dark, 0.0)
+            bg_corr = background - dark
+            if float(self.np.max(bg_corr)) <= eps:
+                return {"status": "invalid_background", "message": "背景图扣除暗场后强度过低，无法计算衬比度。"}
+
+            corrected = stripe_corr / self.np.maximum(bg_corr, eps)
+            roi = self._center_crop(corrected)
+            if roi.size == 0:
+                return {"status": "need_roi", "message": "有效分析区域为空。"}
+
+            contrast = self._fringe_contrast(roi)
+            return {
+                "status": "ok",
+                "message": "已完成暗场/背景校正衬比度计算。",
+                "gamma": self._round(contrast["gamma"]),
+                "i_max": self._round(contrast["i_max"]),
+                "i_min": self._round(contrast["i_min"]),
+                "roi_height": int(roi.shape[0]),
+                "roi_width": int(roi.shape[1]),
+                "image_height": int(stripe.shape[0]),
+                "image_width": int(stripe.shape[1]),
+            }
+        except Exception as exc:
+            return {"status": "contrast_error", "message": str(exc)}
+
+    def corrected_contrast_image(self, stripe_frame, background_frame, dark_frame):
+        if not self._ready() or stripe_frame is None or background_frame is None or dark_frame is None:
+            return None
+        try:
+            dark = self._gray_float(dark_frame)
+            background = self._gray_float(background_frame)
+            stripe = self._gray_float(stripe_frame)
+            if dark.shape != background.shape or dark.shape != stripe.shape:
+                return None
+
+            bg_corr = background - dark
+            if float(self.np.max(bg_corr)) <= 1e-6:
+                return None
+
+            corrected = self.np.maximum(stripe - dark, 0.0) / self.np.maximum(bg_corr, 1e-6)
+            return self._display_gray(corrected)
+        except Exception:
+            return None
+
     def analyze_frame(self, frame, options=None):
         if not self._ready():
             return self._dependency_result()
@@ -161,6 +246,13 @@ class StripeAnalyzer(object):
         rw = max(1, int(roi.get("width", w)))
         rh = max(1, int(roi.get("height", h)))
         return gray[y : min(h, y + rh), x : min(w, x + rw)]
+
+    def _gray_float(self, frame):
+        if len(frame.shape) == 2:
+            return frame.astype(float)
+        if self.cv2 is not None:
+            return self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2GRAY).astype(float)
+        return (frame[:, :, 0] * 0.299 + frame[:, :, 1] * 0.587 + frame[:, :, 2] * 0.114).astype(float)
 
     def _center_crop(self, gray):
         h, w = gray.shape[:2]
@@ -450,6 +542,27 @@ class StripeAnalyzer(object):
 
         spacings = [item[0] for item in spacing_items]
         return {"spacing": float(np.median(np.array(spacings, dtype=float))), "intervals": spacings}
+
+    def _fringe_contrast(self, gray):
+        np = self.np
+        values = gray.astype(float).ravel()
+        if values.size == 0:
+            return {"gamma": None, "i_max": None, "i_min": None}
+
+        i_min = float(np.percentile(values, 5))
+        i_max = float(np.percentile(values, 95))
+        denom = i_max + i_min
+        gamma = None if denom <= 1e-9 else max(0.0, min(1.0, (i_max - i_min) / denom))
+        return {"gamma": gamma, "i_max": i_max, "i_min": i_min}
+
+    def _display_gray(self, gray):
+        np = self.np
+        values = gray.astype(float)
+        lo = float(np.percentile(values, 1))
+        hi = float(np.percentile(values, 99))
+        if hi - lo <= 1e-9:
+            return np.zeros(values.shape, dtype=np.uint8)
+        return np.clip((values - lo) * 255.0 / (hi - lo), 0, 255).astype(np.uint8)
 
     def _round(self, value):
         return None if value is None else round(float(value), 3)

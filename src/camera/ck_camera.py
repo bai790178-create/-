@@ -1,9 +1,13 @@
 import ctypes
 import os
+import sys
 from pathlib import Path
 
 
+SDK_DLL_NAME = "CKCameraDLL_X64.dll"
+PACKAGED_SDK_DIR = "sdk"
 REFERENCE_SDK_DIR = Path("D:/纹影声场可视化及声悬浮实验平台教学及数据处理软件")
+_DLL_DIRECTORY_HANDLES = []
 
 
 class CKDeviceInfo(ctypes.Structure):
@@ -48,21 +52,93 @@ def _decode_bytes(value):
     return ""
 
 
-def _sdk_dir():
+def _app_dir():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+def _sdk_candidates():
     env_dir = os.environ.get("CK_CAMERA_SDK_DIR")
-    if env_dir and Path(env_dir).exists():
-        return Path(env_dir)
-    if REFERENCE_SDK_DIR.exists():
-        return REFERENCE_SDK_DIR
+    if env_dir:
+        yield Path(env_dir)
+
+    app_dir = _app_dir()
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if bundle_dir:
+        yield Path(bundle_dir) / PACKAGED_SDK_DIR
+        yield Path(bundle_dir)
+    yield app_dir / PACKAGED_SDK_DIR
+    yield app_dir
+    yield Path.cwd() / PACKAGED_SDK_DIR
+    yield Path.cwd()
+    yield REFERENCE_SDK_DIR
+
+
+def _resolved_sdk_candidates():
+    seen = set()
+    for candidate in _sdk_candidates():
+        try:
+            resolved = candidate.expanduser().resolve()
+        except Exception:
+            resolved = candidate
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        yield resolved
+
+
+def _sdk_dir():
+    for candidate in _resolved_sdk_candidates():
+        if (candidate / SDK_DLL_NAME).exists():
+            return candidate
     return None
+
+
+def _sdk_search_message():
+    paths = [str(candidate) for candidate in _resolved_sdk_candidates()]
+    return "；".join(paths)
+
+
+def _add_sdk_dll_directories(sdk_dir):
+    dll_dirs = [sdk_dir]
+    try:
+        dll_dirs.extend(path.parent for path in sdk_dir.rglob("*.dll"))
+    except OSError:
+        pass
+
+    seen = set()
+    for dll_dir in dll_dirs:
+        key = str(dll_dir).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if hasattr(os, "add_dll_directory"):
+            _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(str(dll_dir)))
+        os.environ["PATH"] = str(dll_dir) + os.pathsep + os.environ.get("PATH", "")
 
 
 def _load_sdk():
     sdk_dir = _sdk_dir()
     if sdk_dir is None:
-        raise RuntimeError("未找到 CK 相机 SDK 目录。")
-    os.add_dll_directory(str(sdk_dir))
-    return ctypes.WinDLL(str(sdk_dir / "CKCameraDLL_X64.dll"))
+        raise RuntimeError(
+            "未找到 CK 相机 SDK。请将 {} 放到程序 sdk 文件夹，或设置 CK_CAMERA_SDK_DIR。已查找：{}".format(
+                SDK_DLL_NAME,
+                _sdk_search_message(),
+            )
+        )
+    _add_sdk_dll_directories(sdk_dir)
+    sdk_dll = sdk_dir / SDK_DLL_NAME
+    try:
+        return ctypes.WinDLL(str(sdk_dll))
+    except OSError as exc:
+        raise RuntimeError(
+            "CK 相机 SDK 加载失败：{}。请确认 sdk 文件夹内包含相机运行所需的全部 DLL。SDK 路径：{}".format(
+                exc,
+                sdk_dir,
+            )
+        )
 
 
 def _configure_sdk(dll):

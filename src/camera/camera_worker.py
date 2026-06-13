@@ -5,18 +5,12 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 BACKEND_NAMES = {
     "DSHOW": "DirectShow",
-    "MSMF": "Media Foundation",
-    "ANY": "Auto",
     "CKSDK": "CK SDK",
 }
 
 
 def cv_backend(cv2, backend_name):
     backend_name = (backend_name or "DSHOW").upper()
-    if backend_name == "MSMF":
-        return cv2.CAP_MSMF
-    if backend_name == "ANY":
-        return cv2.CAP_ANY
     return cv2.CAP_DSHOW
 
 

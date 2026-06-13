@@ -41,6 +41,12 @@ class ExperimentStore(object):
         self._write_json("analysis.json", data)
         return os.path.join(self.current_dir, "analysis.json")
 
+    def save_contrast(self, data):
+        if self.current_dir is None:
+            raise RuntimeError("请先创建实验记录。")
+        self._write_json("contrast.json", data)
+        return os.path.join(self.current_dir, "contrast.json")
+
     def append_log(self, message):
         if self.current_dir is None:
             return

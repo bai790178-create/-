@@ -8,3 +8,6 @@ __pycache__/
 .ruff_cache/
 experiments/*
 !experiments/.gitkeep
+build/
+dist/
+*.spec
