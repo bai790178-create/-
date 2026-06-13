@@ -59,16 +59,22 @@ class CameraWorker(QThread):
         self.backend_name = "DSHOW"
         self._running = False
         self._capture = None
+        self._frame_pending = False
 
     def start(self, camera_index=0, backend_name="DSHOW"):
         self.camera_index = int(camera_index)
         self.backend_name = backend_name
         self._running = True
+        self._frame_pending = False
         super(CameraWorker, self).start()
 
     def stop(self):
         self._running = False
         self.wait(1200)
+        self._frame_pending = False
+
+    def mark_frame_consumed(self):
+        self._frame_pending = False
 
     def run(self):
         if self.backend_name == "CKSDK":
@@ -99,7 +105,9 @@ class CameraWorker(QThread):
             if not ok or frame is None:
                 self.camera_error.emit("相机帧读取失败。")
                 break
-            self.frame_ready.emit(frame)
+            if not self._frame_pending:
+                self._frame_pending = True
+                self.frame_ready.emit(frame)
             time.sleep(0.03)
 
         if self._capture is not None:
@@ -129,8 +137,11 @@ class CameraWorker(QThread):
                 if not ok or frame is None:
                     self.camera_error.emit("CK 相机帧读取失败。")
                     break
-                self.frame_ready.emit(frame)
+                if not self._frame_pending:
+                    self._frame_pending = True
+                    self.frame_ready.emit(frame)
                 time.sleep(0.03)
         finally:
             capture.close()
+            self._frame_pending = False
             self._running = False

@@ -51,6 +51,8 @@ class MainWindow(QMainWindow):
         self.available_cameras = []
         self.realtime_results = deque(maxlen=7)
         self.stable_spacing_px = None
+        self.realtime_outlier_count = 0
+        self.realtime_hold_count = 0
         self.contrast_dark_frame = None
         self.contrast_background_frame = None
         self.contrast_stripe_frame = None
@@ -407,6 +409,7 @@ class MainWindow(QMainWindow):
         self.log_view = QPlainTextEdit()
         self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(600)
         self.log_view.setMinimumHeight(170)
         layout.addWidget(self.log_view)
         return panel
@@ -689,18 +692,23 @@ class MainWindow(QMainWindow):
         self._log("相机已关闭。")
 
     def on_frame_ready(self, frame):
-        if not self.accept_camera_frames:
-            return
-        self.current_frame = frame
-        self.camera_status.setText("相机状态：实时预览")
-        self._show_frame(frame)
-        if hasattr(self, "contrast_preview_label"):
-            self._show_frame_on_label(frame, self.contrast_preview_label)
-        if self.realtime_enabled:
-            ms = int(datetime.now().timestamp() * 1000)
-            if ms - self.last_analysis_ms >= 400:
-                self.last_analysis_ms = ms
-                self.analyze_current_frame(silent=True, realtime=True)
+        worker = self.sender()
+        try:
+            if not self.accept_camera_frames:
+                return
+            self.current_frame = frame
+            self.camera_status.setText("相机状态：实时预览")
+            self._show_frame(frame)
+            if hasattr(self, "contrast_preview_label"):
+                self._show_frame_on_label(frame, self.contrast_preview_label)
+            if self.realtime_enabled:
+                ms = int(datetime.now().timestamp() * 1000)
+                if ms - self.last_analysis_ms >= 400:
+                    self.last_analysis_ms = ms
+                    self.analyze_current_frame(silent=True, realtime=True)
+        finally:
+            if hasattr(worker, "mark_frame_consumed"):
+                worker.mark_frame_consumed()
 
     def on_camera_error(self, message):
         self.camera_status.setText("相机状态：错误")
@@ -901,9 +909,15 @@ class MainWindow(QMainWindow):
     def _reset_realtime_smoothing(self):
         self.realtime_results.clear()
         self.stable_spacing_px = None
+        self.realtime_outlier_count = 0
+        self.realtime_hold_count = 0
 
     def _stabilize_realtime_result(self, result):
         if result.stripe_spacing_px is None or result.confidence < 0.35:
+            self.realtime_hold_count += 1
+            if self.realtime_hold_count >= 8:
+                self._reset_realtime_smoothing()
+                return result
             if self.stable_spacing_px is not None:
                 result.raw_spacing_px = result.stripe_spacing_px
                 result.stable_spacing_px = self.stable_spacing_px
@@ -915,15 +929,27 @@ class MainWindow(QMainWindow):
 
         raw_spacing = float(result.stripe_spacing_px)
         result.raw_spacing_px = raw_spacing
+        self.realtime_hold_count = 0
         self.realtime_results.append(raw_spacing)
         values = sorted(self.realtime_results)
         median = values[len(values) // 2]
 
         if self.stable_spacing_px is None:
             self.stable_spacing_px = median
+            self.realtime_outlier_count = 0
         else:
             if abs(raw_spacing - self.stable_spacing_px) / max(self.stable_spacing_px, 1.0) > 0.28:
-                median = self.stable_spacing_px
+                self.realtime_outlier_count += 1
+                if self.realtime_outlier_count < 3:
+                    median = self.stable_spacing_px
+                else:
+                    self.realtime_results.clear()
+                    self.realtime_results.append(raw_spacing)
+                    self.stable_spacing_px = raw_spacing
+                    median = raw_spacing
+                    self.realtime_outlier_count = 0
+            else:
+                self.realtime_outlier_count = 0
             self.stable_spacing_px = self.stable_spacing_px * 0.72 + median * 0.28
 
         result.stable_spacing_px = round(self.stable_spacing_px, 3)
@@ -1001,11 +1027,11 @@ class MainWindow(QMainWindow):
                 rgb = frame
             if len(rgb.shape) == 2:
                 h, w = rgb.shape
-                image = QImage(rgb.data, w, h, w, QImage.Format_Grayscale8).copy()
+                image = QImage(rgb.data, w, h, w, QImage.Format_Grayscale8)
                 label.setPixmap(QPixmap.fromImage(image).scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 return True
             h, w, channels = rgb.shape
-            image = QImage(rgb.data, w, h, channels * w, QImage.Format_RGB888).copy()
+            image = QImage(rgb.data, w, h, channels * w, QImage.Format_RGB888)
             label.setPixmap(QPixmap.fromImage(image).scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
             return True
         except Exception as exc:
@@ -1020,12 +1046,12 @@ class MainWindow(QMainWindow):
                 rgb = frame
             if len(rgb.shape) == 2:
                 h, w = rgb.shape
-                image = QImage(rgb.data, w, h, w, QImage.Format_Grayscale8).copy()
+                image = QImage(rgb.data, w, h, w, QImage.Format_Grayscale8)
                 self.preview_label.setPixmap(QPixmap.fromImage(image).scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 self.resolution_status.setText("分辨率：{} x {}".format(w, h))
                 return True
             h, w, channels = rgb.shape
-            image = QImage(rgb.data, w, h, channels * w, QImage.Format_RGB888).copy()
+            image = QImage(rgb.data, w, h, channels * w, QImage.Format_RGB888)
             self.preview_label.setPixmap(QPixmap.fromImage(image).scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
             self.resolution_status.setText("分辨率：{} x {}".format(w, h))
             return True

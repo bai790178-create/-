@@ -140,8 +140,8 @@ class StripeAnalyzer(object):
             if dark.shape != background.shape or dark.shape != stripe.shape:
                 return {"status": "shape_mismatch", "message": "暗场图、背景图和条纹图尺寸不一致。"}
 
-            eps = 1e-6
-            stripe_corr = self.np.maximum(stripe - dark, 0.0)
+            eps = self.np.float32(1e-6)
+            stripe_corr = self.np.maximum(stripe - dark, self.np.float32(0.0))
             bg_corr = background - dark
             if float(self.np.max(bg_corr)) <= eps:
                 return {"status": "invalid_background", "message": "背景图扣除暗场后强度过低，无法计算衬比度。"}
@@ -180,7 +180,7 @@ class StripeAnalyzer(object):
             if float(self.np.max(bg_corr)) <= 1e-6:
                 return None
 
-            corrected = self.np.maximum(stripe - dark, 0.0) / self.np.maximum(bg_corr, 1e-6)
+            corrected = self.np.maximum(stripe - dark, self.np.float32(0.0)) / self.np.maximum(bg_corr, self.np.float32(1e-6))
             return self._display_gray(corrected)
         except Exception:
             return None
@@ -249,10 +249,10 @@ class StripeAnalyzer(object):
 
     def _gray_float(self, frame):
         if len(frame.shape) == 2:
-            return frame.astype(float)
+            return frame.astype(self.np.float32)
         if self.cv2 is not None:
-            return self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2GRAY).astype(float)
-        return (frame[:, :, 0] * 0.299 + frame[:, :, 1] * 0.587 + frame[:, :, 2] * 0.114).astype(float)
+            return self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2GRAY).astype(self.np.float32)
+        return (frame[:, :, 0] * 0.299 + frame[:, :, 1] * 0.587 + frame[:, :, 2] * 0.114).astype(self.np.float32)
 
     def _center_crop(self, gray):
         h, w = gray.shape[:2]
@@ -264,12 +264,12 @@ class StripeAnalyzer(object):
         np = self.np
         cv2 = self.cv2
         if cv2 is None:
-            return self._normalize(gray.astype(float))
+            return self._normalize(gray.astype(np.float32))
 
         gray8 = gray.astype(np.uint8)
         sigma = max(8.0, min(gray8.shape[:2]) / 36.0)
         background = cv2.GaussianBlur(gray8, (0, 0), sigma)
-        flattened = np.clip(gray8.astype(float) - background.astype(float) + 128.0, 0, 255).astype(np.uint8)
+        flattened = np.clip(gray8.astype(np.float32) - background.astype(np.float32) + np.float32(128.0), 0, 255).astype(np.uint8)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(flattened)
         return cv2.GaussianBlur(enhanced, (3, 3), 0)
@@ -312,8 +312,8 @@ class StripeAnalyzer(object):
 
         weights = np.array([
             max(0.05, item["corr"] * 0.65 + item["clarity"] * 0.35) for item in selected
-        ], dtype=float)
-        profiles = np.array([item["profile"] for item in selected], dtype=float)
+        ], dtype=np.float32)
+        profiles = np.array([item["profile"] for item in selected], dtype=np.float32)
         combined = np.average(profiles, axis=0, weights=weights)
         norm = self._normalize(self._smooth(combined))
         clarity = self._clarity(norm)
@@ -395,15 +395,15 @@ class StripeAnalyzer(object):
         window = max(7, int(len(profile) / 120))
         if window % 2 == 0:
             window += 1
-        return np.convolve(profile.astype(float), np.ones(window, dtype=float) / float(window), mode="same")
+        return np.convolve(profile.astype(np.float32), np.ones(window, dtype=np.float32) / np.float32(window), mode="same")
 
     def _normalize(self, profile):
         np = self.np
         lo = float(np.min(profile))
         hi = float(np.max(profile))
         if hi - lo < 1e-6:
-            return np.zeros_like(profile, dtype=float)
-        return (profile - lo) / (hi - lo)
+            return np.zeros_like(profile, dtype=np.float32)
+        return ((profile - lo) / (hi - lo)).astype(np.float32)
 
     def _clarity(self, profile):
         np = self.np
@@ -429,13 +429,13 @@ class StripeAnalyzer(object):
         if not stats:
             return None
         np = self.np
-        periods = np.array([item["period"] for item in stats], dtype=float)
+        periods = np.array([item["period"] for item in stats], dtype=np.float32)
         median = float(np.median(periods))
         usable = [item for item in stats if median * 0.65 <= item["period"] <= median * 1.35]
         if not usable:
             return median
-        weights = np.array([max(0.05, item["corr"] * item["clarity"]) for item in usable], dtype=float)
-        values = np.array([item["period"] for item in usable], dtype=float)
+        weights = np.array([max(0.05, item["corr"] * item["clarity"]) for item in usable], dtype=np.float32)
+        values = np.array([item["period"] for item in usable], dtype=np.float32)
         return float(np.average(values, weights=weights))
 
     def _autocorrelation_period(self, profile):
@@ -545,7 +545,7 @@ class StripeAnalyzer(object):
 
     def _fringe_contrast(self, gray):
         np = self.np
-        values = gray.astype(float).ravel()
+        values = gray.astype(np.float32).ravel()
         if values.size == 0:
             return {"gamma": None, "i_max": None, "i_min": None}
 
@@ -557,7 +557,7 @@ class StripeAnalyzer(object):
 
     def _display_gray(self, gray):
         np = self.np
-        values = gray.astype(float)
+        values = gray.astype(np.float32)
         lo = float(np.percentile(values, 1))
         hi = float(np.percentile(values, 99))
         if hi - lo <= 1e-9:
