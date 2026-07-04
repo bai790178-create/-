@@ -2,8 +2,8 @@ import os
 from datetime import datetime
 from collections import deque
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtCore import QRect, Qt, pyqtSignal
+from PyQt5.QtGui import QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -33,6 +33,123 @@ from camera.camera_worker import BACKEND_NAMES, CameraWorker, discover_cameras
 from storage.experiment_store import ExperimentStore
 
 
+class RoiPreviewLabel(QLabel):
+    roi_changed = pyqtSignal(object)
+
+    def __init__(self, text=""):
+        super(RoiPreviewLabel, self).__init__(text)
+        self.image_size = None
+        self.roi = None
+        self.drag_start = None
+        self.drag_current = None
+
+    def set_image_size(self, width, height):
+        size = (int(width), int(height))
+        if self.image_size != size:
+            self.image_size = size
+            self.roi = None
+        self.update()
+
+    def set_roi(self, roi):
+        self.roi = roi
+        self.update()
+
+    def clear_roi(self):
+        self.drag_start = None
+        self.drag_current = None
+        if self.roi is not None:
+            self.roi = None
+            self.roi_changed.emit(None)
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.image_size:
+            pos = event.pos()
+            if self._display_rect().contains(pos):
+                self.drag_start = pos
+                self.drag_current = pos
+                self.update()
+                return
+        super(RoiPreviewLabel, self).mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.drag_start is not None:
+            self.drag_current = event.pos()
+            self.update()
+            return
+        super(RoiPreviewLabel, self).mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.drag_start is not None:
+            rect = QRect(self.drag_start, event.pos()).normalized()
+            rect = rect.intersected(self._display_rect())
+            self.drag_start = None
+            self.drag_current = None
+            roi = self._label_rect_to_roi(rect)
+            self.roi = roi
+            self.roi_changed.emit(roi)
+            self.update()
+            return
+        super(RoiPreviewLabel, self).mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        super(RoiPreviewLabel, self).paintEvent(event)
+        rect = None
+        if self.drag_start is not None and self.drag_current is not None:
+            rect = QRect(self.drag_start, self.drag_current).normalized().intersected(self._display_rect())
+        elif self.roi:
+            rect = self._roi_to_label_rect(self.roi)
+        if rect is None or rect.width() < 2 or rect.height() < 2:
+            return
+        painter = QPainter(self)
+        painter.setPen(QPen(Qt.yellow, 2))
+        painter.drawRect(rect)
+        painter.end()
+
+    def _display_rect(self):
+        if not self.image_size:
+            return QRect()
+        image_w, image_h = self.image_size
+        if image_w <= 0 or image_h <= 0:
+            return QRect()
+        scale = min(float(self.width()) / image_w, float(self.height()) / image_h)
+        display_w = int(round(image_w * scale))
+        display_h = int(round(image_h * scale))
+        left = int((self.width() - display_w) / 2)
+        top = int((self.height() - display_h) / 2)
+        return QRect(left, top, display_w, display_h)
+
+    def _label_rect_to_roi(self, rect):
+        if not self.image_size or rect.width() < 4 or rect.height() < 4:
+            return None
+        display = self._display_rect()
+        if display.width() <= 0 or display.height() <= 0:
+            return None
+        image_w, image_h = self.image_size
+        x = int(round((rect.left() - display.left()) * image_w / float(display.width())))
+        y = int(round((rect.top() - display.top()) * image_h / float(display.height())))
+        w = int(round(rect.width() * image_w / float(display.width())))
+        h = int(round(rect.height() * image_h / float(display.height())))
+        x = max(0, min(image_w - 1, x))
+        y = max(0, min(image_h - 1, y))
+        w = max(1, min(image_w - x, w))
+        h = max(1, min(image_h - y, h))
+        return {"x": x, "y": y, "width": w, "height": h}
+
+    def _roi_to_label_rect(self, roi):
+        if not self.image_size or not roi:
+            return None
+        display = self._display_rect()
+        if display.width() <= 0 or display.height() <= 0:
+            return None
+        image_w, image_h = self.image_size
+        x = display.left() + int(round(float(roi.get("x", 0)) * display.width() / image_w))
+        y = display.top() + int(round(float(roi.get("y", 0)) * display.height() / image_h))
+        w = int(round(float(roi.get("width", 0)) * display.width() / image_w))
+        h = int(round(float(roi.get("height", 0)) * display.height() / image_h))
+        return QRect(x, y, w, h)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, project_root, bundle_root=None):
         super(MainWindow, self).__init__()
@@ -58,6 +175,10 @@ class MainWindow(QMainWindow):
         self.contrast_stripe_frame = None
         self.contrast_corrected_frame = None
         self.contrast_result = None
+        self.contrast_realtime_enabled = False
+        self.last_contrast_analysis_ms = 0
+        self.current_roi = None
+        self.updating_roi = False
 
         self.setWindowTitle("超声光栅实验辅助平台")
         self.resize(1420, 900)
@@ -156,18 +277,22 @@ class MainWindow(QMainWindow):
         self.capture_dark_btn = QPushButton("拍暗场图")
         self.capture_background_btn = QPushButton("拍背景图")
         self.capture_stripe_contrast_btn = QPushButton("拍条纹图并计算")
+        self.realtime_contrast_btn = QPushButton("开始实时衬比度")
         self.clear_contrast_btn = QPushButton("清空")
         self.capture_stripe_contrast_btn.setObjectName("accentButton")
+        self.realtime_contrast_btn.setObjectName("primaryButton")
         for button in (self.capture_dark_btn, self.capture_background_btn, self.clear_contrast_btn):
             button.setObjectName("secondaryButton")
         self._decorate_button(self.capture_dark_btn, QStyle.SP_DialogYesButton)
         self._decorate_button(self.capture_background_btn, QStyle.SP_DialogYesButton)
         self._decorate_button(self.capture_stripe_contrast_btn, QStyle.SP_ComputerIcon)
+        self._decorate_button(self.realtime_contrast_btn, QStyle.SP_BrowserReload)
         self._decorate_button(self.clear_contrast_btn, QStyle.SP_DialogResetButton)
         capture_layout.addWidget(self.capture_dark_btn, 0, 0)
         capture_layout.addWidget(self.capture_background_btn, 0, 1)
         capture_layout.addWidget(self.capture_stripe_contrast_btn, 1, 0, 1, 2)
-        capture_layout.addWidget(self.clear_contrast_btn, 2, 0, 1, 2)
+        capture_layout.addWidget(self.realtime_contrast_btn, 2, 0, 1, 2)
+        capture_layout.addWidget(self.clear_contrast_btn, 3, 0, 1, 2)
 
         status = QGroupBox("采集状态")
         status.setObjectName("paramsPanel")
@@ -255,11 +380,12 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(16, 26, 16, 16)
         layout.setSpacing(12)
-        self.preview_label = QLabel("导入图片或打开 USB 相机")
+        self.preview_label = RoiPreviewLabel("导入图片或打开 USB 相机")
         self.preview_label.setObjectName("previewLabel")
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setMinimumSize(760, 520)
         self.preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.preview_label.roi_changed.connect(self._on_roi_changed)
         layout.addWidget(self.preview_label, 1)
 
         camera_bar = QHBoxLayout()
@@ -347,8 +473,15 @@ class MainWindow(QMainWindow):
         self.duration = QLineEdit("30")
         self.notes = QPlainTextEdit()
         self.notes.setFixedHeight(86)
+        self.roi_label = QLabel("未选择")
+        self.roi_label.setObjectName("resultValue")
+        self.clear_roi_btn = QPushButton("清除 ROI")
+        self.clear_roi_btn.setObjectName("secondaryButton")
+        self._decorate_button(self.clear_roi_btn, QStyle.SP_DialogResetButton)
         form.addRow("分析类型", self.analysis_type)
         form.addRow("像素当量 (um/px)", self.pixel_scale)
+        form.addRow("分析 ROI", self.roi_label)
+        form.addRow("", self.clear_roi_btn)
         form.addRow("材料类型", self.material)
         form.addRow("质量浓度 (%)", self.concentration)
         form.addRow("超声频率 (MHz)", self.frequency)
@@ -367,15 +500,19 @@ class MainWindow(QMainWindow):
         self.result_spacing.setMinimumHeight(52)
         self.result_bright = QLabel("--")
         self.result_dark = QLabel("--")
+        self.result_uncertainty = QLabel("--")
+        self.result_method = QLabel("--")
         self.result_clarity = QLabel("--")
         self.result_confidence = QLabel("--")
         self.result_state = QLabel("待机")
         self.result_state.setWordWrap(True)
-        for label in (self.result_bright, self.result_dark, self.result_clarity, self.result_confidence, self.result_state):
+        for label in (self.result_bright, self.result_dark, self.result_uncertainty, self.result_method, self.result_clarity, self.result_confidence, self.result_state):
             label.setObjectName("resultValue")
         result_layout.addRow("条纹中心距", self.result_spacing)
         result_layout.addRow("亮纹中心距", self.result_bright)
         result_layout.addRow("暗纹中心距", self.result_dark)
+        result_layout.addRow("间距不确定度", self.result_uncertainty)
+        result_layout.addRow("测量方式", self.result_method)
         result_layout.addRow("清晰度", self.result_clarity)
         result_layout.addRow("置信度", self.result_confidence)
         result_layout.addRow("状态", self.result_state)
@@ -435,9 +572,11 @@ class MainWindow(QMainWindow):
         self.save_btn.clicked.connect(self.save_experiment)
         self.refresh_camera_btn.clicked.connect(self.refresh_cameras)
         self.backend_select.currentIndexChanged.connect(self.refresh_cameras)
+        self.clear_roi_btn.clicked.connect(lambda: self.clear_roi())
         self.capture_dark_btn.clicked.connect(self.capture_contrast_dark)
         self.capture_background_btn.clicked.connect(self.capture_contrast_background)
         self.capture_stripe_contrast_btn.clicked.connect(self.capture_contrast_stripe)
+        self.realtime_contrast_btn.clicked.connect(self.toggle_realtime_contrast)
         self.clear_contrast_btn.clicked.connect(self.clear_contrast)
 
     def _decorate_button(self, button, standard_pixmap):
@@ -687,8 +826,10 @@ class MainWindow(QMainWindow):
             self.camera_worker = None
         self.camera_status.setText("相机状态：已关闭")
         self.realtime_enabled = False
+        self.contrast_realtime_enabled = False
         self._reset_realtime_smoothing()
         self.realtime_btn.setText("开始实时分析")
+        self.realtime_contrast_btn.setText("开始实时衬比度")
         self._log("相机已关闭。")
 
     def on_frame_ready(self, frame):
@@ -706,6 +847,11 @@ class MainWindow(QMainWindow):
                 if ms - self.last_analysis_ms >= 400:
                     self.last_analysis_ms = ms
                     self.analyze_current_frame(silent=True, realtime=True)
+            if self.contrast_realtime_enabled:
+                ms = int(datetime.now().timestamp() * 1000)
+                if ms - self.last_contrast_analysis_ms >= 500:
+                    self.last_contrast_analysis_ms = ms
+                    self.analyze_realtime_contrast(frame)
         finally:
             if hasattr(worker, "mark_frame_consumed"):
                 worker.mark_frame_consumed()
@@ -738,8 +884,9 @@ class MainWindow(QMainWindow):
         self.accept_camera_frames = False
         if self.camera_worker and self.camera_worker.isRunning():
             self.stop_camera()
-        result = self.analyzer.analyze_file(path, self._analysis_options())
         self.current_frame = self.analyzer.read_image(path)
+        self.clear_roi(reanalyze=False)
+        result = self.analyzer.analyze_file(path, self._analysis_options())
         shown = False
         if self.current_frame is not None:
             shown = self._show_frame(self.current_frame)
@@ -761,6 +908,32 @@ class MainWindow(QMainWindow):
         self._display_result(result)
         if not silent:
             self._log("已完成当前图像分析。")
+
+    def clear_roi(self, reanalyze=True):
+        self.current_roi = None
+        if hasattr(self, "roi_label"):
+            self.roi_label.setText("未选择")
+        if hasattr(self, "preview_label") and hasattr(self.preview_label, "clear_roi"):
+            self.updating_roi = True
+            self.preview_label.clear_roi()
+            self.updating_roi = False
+        self._reset_realtime_smoothing()
+        if reanalyze and self.current_frame is not None:
+            self.analyze_current_frame(silent=True)
+            self._log("已清除 ROI，恢复默认分析区域。")
+
+    def _on_roi_changed(self, roi):
+        if self.updating_roi:
+            return
+        self.current_roi = roi
+        self._reset_realtime_smoothing()
+        if roi:
+            self.roi_label.setText("{} , {} / {} x {}".format(roi["x"], roi["y"], roi["width"], roi["height"]))
+            self._log("已选择 ROI：x={}, y={}, w={}, h={}。".format(roi["x"], roi["y"], roi["width"], roi["height"]))
+        else:
+            self.roi_label.setText("未选择")
+        if self.current_frame is not None:
+            self.analyze_current_frame(silent=True)
 
     def enhance_current_frame(self):
         if self.current_frame is None:
@@ -808,7 +981,14 @@ class MainWindow(QMainWindow):
         frame = self._copy_current_frame_for_contrast("条纹图")
         if frame is None:
             return
-        self.contrast_stripe_frame = frame
+        self._calculate_contrast_from_frame(frame)
+        self._log("衬比度计算：{}".format(self.contrast_result.get("message", self.contrast_result.get("status", ""))))
+
+    def analyze_realtime_contrast(self, frame):
+        self._calculate_contrast_from_frame(frame)
+
+    def _calculate_contrast_from_frame(self, frame):
+        self.contrast_stripe_frame = frame.copy()
         self.contrast_corrected_frame = None
         self._show_frame_on_label(self.contrast_stripe_frame, self.contrast_stripe_image)
         self.contrast_result = self.analyzer.calculate_calibrated_contrast(
@@ -828,9 +1008,10 @@ class MainWindow(QMainWindow):
             self._reset_contrast_thumbnail(self.contrast_corrected_image, "校正后分析图")
         self._update_contrast_statuses()
         self._display_contrast_result(self.contrast_result)
-        self._log("衬比度计算：{}".format(self.contrast_result.get("message", self.contrast_result.get("status", ""))))
 
     def clear_contrast(self):
+        self.contrast_realtime_enabled = False
+        self.realtime_contrast_btn.setText("开始实时衬比度")
         self.contrast_dark_frame = None
         self.contrast_background_frame = None
         self.contrast_stripe_frame = None
@@ -893,6 +1074,24 @@ class MainWindow(QMainWindow):
         label.clear()
         label.setText(text)
         label.setAlignment(Qt.AlignCenter)
+
+    def toggle_realtime_contrast(self):
+        if not self.contrast_realtime_enabled:
+            if self.contrast_dark_frame is None or self.contrast_background_frame is None:
+                self._log("实时衬比度需要先采集暗场图和背景图。")
+                return
+            if self.current_frame is None:
+                self._log("当前没有可用于实时衬比度分析的相机帧。")
+                return
+            self.contrast_realtime_enabled = True
+            self.last_contrast_analysis_ms = 0
+            self.realtime_contrast_btn.setText("停止实时衬比度")
+            self.contrast_state_label.setText("实时衬比度分析中")
+            self._log("实时衬比度已启动，默认每 500ms 分析一帧。")
+        else:
+            self.contrast_realtime_enabled = False
+            self.realtime_contrast_btn.setText("开始实时衬比度")
+            self._log("实时衬比度已停止。")
 
     def toggle_realtime_analysis(self):
         self.realtime_enabled = not self.realtime_enabled
@@ -988,11 +1187,20 @@ class MainWindow(QMainWindow):
         self.result_spacing.setText(spacing)
         self.result_bright.setText("--" if result.bright_spacing_px is None else "{} px".format(result.bright_spacing_px))
         self.result_dark.setText("--" if result.dark_spacing_px is None else "{} px".format(result.dark_spacing_px))
+        self.result_uncertainty.setText("--" if result.spacing_uncertainty_px is None else "± {} px".format(result.spacing_uncertainty_px))
+        self.result_method.setText(self._measurement_method_label(result.measurement_method))
         self.result_clarity.setText("{} / 100".format(result.clarity_score))
         self.result_confidence.setText("{} / 1.0".format(result.confidence))
         self.result_state.setText("{}：{}".format(result.status, result.message))
         self.analysis_status.setText("分析：" + result.status)
         self._draw_profile(result.profile)
+
+    def _measurement_method_label(self, method):
+        if method == "band_center":
+            return "亮带中线"
+        if method == "period_fallback":
+            return "周期估计"
+        return "--"
 
     def _draw_profile(self, profile):
         if not profile:
@@ -1048,19 +1256,36 @@ class MainWindow(QMainWindow):
                 h, w = rgb.shape
                 image = QImage(rgb.data, w, h, w, QImage.Format_Grayscale8)
                 self.preview_label.setPixmap(QPixmap.fromImage(image).scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self._set_preview_image_size(w, h)
                 self.resolution_status.setText("分辨率：{} x {}".format(w, h))
                 return True
             h, w, channels = rgb.shape
             image = QImage(rgb.data, w, h, channels * w, QImage.Format_RGB888)
             self.preview_label.setPixmap(QPixmap.fromImage(image).scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self._set_preview_image_size(w, h)
             self.resolution_status.setText("分辨率：{} x {}".format(w, h))
             return True
         except Exception as exc:
             self._log("图像显示失败：" + str(exc))
             return False
 
+    def _set_preview_image_size(self, width, height):
+        if not hasattr(self.preview_label, "set_image_size"):
+            return
+        old_size = self.preview_label.image_size
+        self.updating_roi = True
+        self.preview_label.set_image_size(width, height)
+        self.updating_roi = False
+        if old_size is not None and old_size != self.preview_label.image_size and self.current_roi is not None:
+            self.current_roi = None
+            self.roi_label.setText("未选择")
+            self._reset_realtime_smoothing()
+
     def _analysis_options(self):
-        return {"pixel_scale": self._float_value(self.pixel_scale.text(), 1.0)}
+        options = {"pixel_scale": self._float_value(self.pixel_scale.text(), 1.0)}
+        if self.current_roi:
+            options["roi"] = self.current_roi
+        return options
 
     def _params(self):
         return {
@@ -1073,6 +1298,7 @@ class MainWindow(QMainWindow):
             "duration_min": self._float_value(self.duration.text(), 0.0),
             "camera_index": self.camera_select.currentData(),
             "camera_backend": self.backend_select.currentData(),
+            "roi": self.current_roi,
             "notes": self.notes.toPlainText(),
         }
 

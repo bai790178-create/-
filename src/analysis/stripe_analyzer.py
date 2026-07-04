@@ -7,14 +7,21 @@ class AnalysisResult(object):
         self,
         stripe_spacing_px=None,
         stripe_spacing_um=None,
+        spacing_mean_px=None,
+        spacing_std_px=None,
+        spacing_sem_px=None,
+        spacing_uncertainty_px=None,
         bright_spacing_px=None,
         dark_spacing_px=None,
+        stripe_centers_px=None,
+        spacing_samples_px=None,
         clarity_score=0.0,
         confidence=0.0,
         status="no_stripe",
         profile=None,
         orientation="vertical",
         message="",
+        measurement_method="period_fallback",
         raw_spacing_px=None,
         stable_spacing_px=None,
         roi_count=0,
@@ -22,14 +29,21 @@ class AnalysisResult(object):
     ):
         self.stripe_spacing_px = stripe_spacing_px
         self.stripe_spacing_um = stripe_spacing_um
+        self.spacing_mean_px = spacing_mean_px
+        self.spacing_std_px = spacing_std_px
+        self.spacing_sem_px = spacing_sem_px
+        self.spacing_uncertainty_px = spacing_uncertainty_px
         self.bright_spacing_px = bright_spacing_px
         self.dark_spacing_px = dark_spacing_px
+        self.stripe_centers_px = stripe_centers_px or []
+        self.spacing_samples_px = spacing_samples_px or []
         self.clarity_score = clarity_score
         self.confidence = confidence
         self.status = status
         self.profile = profile or []
         self.orientation = orientation
         self.message = message
+        self.measurement_method = measurement_method
         self.raw_spacing_px = raw_spacing_px
         self.stable_spacing_px = stable_spacing_px
         self.roi_count = roi_count
@@ -39,13 +53,20 @@ class AnalysisResult(object):
         return {
             "stripe_spacing_px": self.stripe_spacing_px,
             "stripe_spacing_um": self.stripe_spacing_um,
+            "spacing_mean_px": self.spacing_mean_px,
+            "spacing_std_px": self.spacing_std_px,
+            "spacing_sem_px": self.spacing_sem_px,
+            "spacing_uncertainty_px": self.spacing_uncertainty_px,
             "bright_spacing_px": self.bright_spacing_px,
             "dark_spacing_px": self.dark_spacing_px,
+            "stripe_centers_px": self.stripe_centers_px,
+            "spacing_samples_px": self.spacing_samples_px,
             "clarity_score": self.clarity_score,
             "confidence": self.confidence,
             "status": self.status,
             "orientation": self.orientation,
             "message": self.message,
+            "measurement_method": self.measurement_method,
             "profile": self.profile,
             "raw_spacing_px": self.raw_spacing_px,
             "stable_spacing_px": self.stable_spacing_px,
@@ -211,21 +232,25 @@ class StripeAnalyzer(object):
             if gray.size == 0:
                 return AnalysisResult(status="need_roi", message="有效分析区域为空。")
 
+            measurement_gray = gray.copy()
             gray = self._prepare_gray(gray)
 
-            vertical = self._analyze_projection(gray, axis=0, orientation="vertical", pixel_scale=pixel_scale)
-            horizontal = self._analyze_projection(gray, axis=1, orientation="horizontal", pixel_scale=pixel_scale)
+            vertical = self._analyze_projection(gray, axis=0, orientation="vertical", pixel_scale=pixel_scale, measurement_gray=measurement_gray)
+            horizontal = self._analyze_projection(gray, axis=1, orientation="horizontal", pixel_scale=pixel_scale, measurement_gray=measurement_gray)
             result = vertical if vertical.confidence >= horizontal.confidence else horizontal
 
-            if result.confidence < 0.25:
+            if result.confidence < 0.35:
                 result.status = "low_confidence"
                 result.message = "条纹周期不稳定，建议重新选择 ROI 或调整图像清晰度。"
             elif result.stripe_spacing_px is None:
                 result.status = "no_stripe"
                 result.message = "未识别到稳定的相邻亮纹或暗纹中心距。"
-            else:
+            elif result.measurement_method == "band_center":
                 result.status = "ok"
-                result.message = "已识别相邻亮条纹/暗条纹中心距。"
+                result.message = "已按亮条带几何中线测得相邻中心距。"
+            else:
+                result.status = "period_estimate"
+                result.message = "亮条带样本不足，已回退到周期估计。"
             return result
         except Exception as exc:
             return AnalysisResult(status="analysis_error", message=str(exc))
@@ -274,31 +299,40 @@ class StripeAnalyzer(object):
         enhanced = clahe.apply(flattened)
         return cv2.GaussianBlur(enhanced, (3, 3), 0)
 
-    def _analyze_projection(self, gray, axis, orientation, pixel_scale):
+    def _analyze_projection(self, gray, axis, orientation, pixel_scale, measurement_gray=None):
         np = self.np
         bands = self._projection_bands(gray, axis)
         stats = []
-        for profile, band_center_distance in bands:
+        for profile, band_center_distance, band_quality in bands:
             norm_profile = self._normalize(self._smooth(profile))
             clarity = self._clarity(norm_profile)
             period, corr = self._estimate_period(norm_profile)
-            if period is not None and corr >= 0.12 and clarity >= 0.12:
+            if period is not None and period >= 8.0 and corr >= 0.12 and clarity >= 0.12:
+                local_score = corr * 0.48 + clarity * 0.22 + band_quality * 0.30
                 stats.append({
                     "profile": norm_profile,
                     "period": period,
                     "corr": corr,
                     "clarity": clarity,
+                    "quality": band_quality,
+                    "score": local_score,
                     "band_center_distance": band_center_distance,
                 })
 
         master_period = self._weighted_period(stats)
         selected = []
         if master_period is not None:
-            selected = [
+            period_matched = [
                 item
                 for item in stats
                 if master_period * 0.65 <= item["period"] <= master_period * 1.35
             ]
+            if period_matched:
+                best_score = max(item["score"] for item in period_matched)
+                score_floor = max(0.14, best_score * 0.58)
+                selected = [item for item in period_matched if item["score"] >= score_floor]
+                if not selected:
+                    selected = sorted(period_matched, key=lambda item: item["score"], reverse=True)[:2]
         if not selected:
             full_profile = gray.mean(axis=axis)
             norm = self._normalize(self._smooth(full_profile))
@@ -307,11 +341,13 @@ class StripeAnalyzer(object):
                 "period": master_period,
                 "corr": 0.0,
                 "clarity": self._clarity(norm),
+                "quality": self._band_quality(gray),
+                "score": 0.0,
                 "band_center_distance": 0.0,
             }]
 
         weights = np.array([
-            max(0.05, item["corr"] * 0.65 + item["clarity"] * 0.35) for item in selected
+            max(0.04, item["score"] * item["score"]) for item in selected
         ], dtype=np.float32)
         profiles = np.array([item["profile"] for item in selected], dtype=np.float32)
         combined = np.average(profiles, axis=0, weights=weights)
@@ -322,25 +358,36 @@ class StripeAnalyzer(object):
             period = master_period if period is None else (master_period * 0.65 + period * 0.35)
             corr = max(corr, max(item["corr"] for item in selected))
 
-        bright_info = self._peak_spacing_details(norm, kind="bright", expected_period=period, sample_count=5)
-        dark_info = self._peak_spacing_details(norm, kind="dark", expected_period=period)
-        bright = bright_info["spacing"] if bright_info else None
-        dark = dark_info["spacing"] if dark_info else None
+        measurement_norm = norm
+        if measurement_gray is not None and measurement_gray.size:
+            measurement_norm = self._normalize(self._smooth(measurement_gray.mean(axis=axis)))
 
-        spacing = None
-        if bright is not None:
-            spacing = bright
-            if dark is not None:
-                agreement = max(0.0, 1.0 - abs(bright - dark) / max(spacing, 1.0))
-            else:
-                agreement = 0.72
-        elif dark is not None:
-            spacing = dark
-            agreement = 0.65
-        elif period:
+        bright_info = self._band_center_spacing_details(measurement_norm, kind="bright", expected_period=period)
+        dark_info = self._band_center_spacing_details(measurement_norm, kind="dark", expected_period=period)
+
+        chosen_info = None
+        measurement_method = "period_fallback"
+        if bright_info is not None and bright_info["band_count"] >= 4 and bright_info["sample_count"] >= 3:
+            chosen_info = bright_info
+            measurement_method = "band_center"
+        elif dark_info is not None and dark_info["band_count"] >= 4 and dark_info["sample_count"] >= 3:
+            chosen_info = dark_info
+            measurement_method = "band_center"
+
+        if chosen_info is not None:
+            spacing = chosen_info["spacing_mean"]
+            agreement = chosen_info["consistency"]
+        elif period is not None:
             spacing = period
             agreement = 0.45
         else:
+            spacing = None
+            agreement = 0.0
+
+        if spacing is not None and spacing < 8.0:
+            spacing = None
+            chosen_info = None
+            measurement_method = "period_fallback"
             agreement = 0.0
 
         if spacing is not None and period:
@@ -348,19 +395,49 @@ class StripeAnalyzer(object):
         else:
             period_agreement = 0.0
 
-        confidence = max(0.0, min(1.0, corr * 0.5 + agreement * 0.3 + period_agreement * 0.2))
+        quality = max(item.get("quality", 0.0) for item in selected)
+        consistency = self._period_consistency(selected)
+        confidence = max(0.0, min(1.0, corr * 0.42 + agreement * 0.33 + period_agreement * 0.15 + quality * 0.10))
+        if chosen_info is not None:
+            confidence = max(confidence, min(1.0, 0.42 + chosen_info["band_count"] * 0.06 + chosen_info["consistency"] * 0.22))
+        confidence = max(0.0, min(1.0, confidence * (0.74 + quality * 0.26) * consistency))
+
+        if chosen_info is not None:
+            stripe_centers_px = chosen_info["centers"]
+            spacing_samples_px = chosen_info["spacing_samples"]
+            spacing_mean_px = chosen_info["spacing_mean"]
+            spacing_std_px = chosen_info["spacing_std"]
+            spacing_sem_px = chosen_info["spacing_sem"]
+            spacing_uncertainty_px = chosen_info["spacing_uncertainty"]
+        else:
+            stripe_centers_px = []
+            spacing_samples_px = []
+            spacing_mean_px = spacing
+            spacing_std_px = None
+            spacing_sem_px = None
+            spacing_uncertainty_px = self._round(max(0.2, float(spacing) * 0.05)) if spacing is not None else None
+
+        bright_spacing = bright_info["spacing_mean"] if bright_info is not None else None
+        dark_spacing = dark_info["spacing_mean"] if dark_info is not None else None
         return AnalysisResult(
             stripe_spacing_px=self._round(spacing),
             stripe_spacing_um=self._round(spacing * pixel_scale if spacing is not None else None),
-            bright_spacing_px=self._round(bright),
-            dark_spacing_px=self._round(dark),
+            spacing_mean_px=self._round(spacing_mean_px),
+            spacing_std_px=self._round(spacing_std_px),
+            spacing_sem_px=self._round(spacing_sem_px),
+            spacing_uncertainty_px=self._round(spacing_uncertainty_px),
+            bright_spacing_px=self._round(bright_spacing),
+            dark_spacing_px=self._round(dark_spacing),
+            stripe_centers_px=[self._round(v) for v in stripe_centers_px],
+            spacing_samples_px=[self._round(v) for v in spacing_samples_px],
             clarity_score=self._round(clarity * 100.0),
             confidence=self._round(confidence),
             status="ok" if spacing is not None else "no_stripe",
             profile=[self._round(float(v)) for v in norm.tolist()],
             orientation=orientation,
+            measurement_method=measurement_method,
             roi_count=len(selected),
-            used_bright_intervals=[self._round(v) for v in (bright_info["intervals"] if bright_info else [])],
+            used_bright_intervals=[self._round(v) for v in (bright_info["spacing_samples"] if bright_info else [])],
         )
 
     def _projection_bands(self, gray, axis):
@@ -375,7 +452,8 @@ class StripeAnalyzer(object):
                 start = max(0, int(center - width / 2))
                 end = min(h, int(center + width / 2))
                 if end - start >= 8:
-                    bands.append((gray[start:end, :].mean(axis=0), abs(center - length / 2.0) / max(length, 1)))
+                    band = gray[start:end, :]
+                    bands.append((band.mean(axis=0), abs(center - length / 2.0) / max(length, 1), self._band_quality(band)))
         else:
             length = w
             width = max(12, int(length * 0.22))
@@ -384,11 +462,37 @@ class StripeAnalyzer(object):
                 start = max(0, int(center - width / 2))
                 end = min(w, int(center + width / 2))
                 if end - start >= 8:
-                    bands.append((gray[:, start:end].mean(axis=1), abs(center - length / 2.0) / max(length, 1)))
+                    band = gray[:, start:end]
+                    bands.append((band.mean(axis=1), abs(center - length / 2.0) / max(length, 1), self._band_quality(band)))
 
         if not bands:
-            bands.append((gray.mean(axis=axis), 0.0))
+            bands.append((gray.mean(axis=axis), 0.0, self._band_quality(gray)))
         return bands
+
+    def _band_quality(self, band):
+        np = self.np
+        if band is None or band.size == 0:
+            return 0.0
+        values = band.astype(np.float32)
+        contrast = float(np.percentile(values, 95) - np.percentile(values, 5)) / 96.0
+        dx = np.diff(values, axis=1) if values.shape[1] > 1 else np.zeros((1,), dtype=np.float32)
+        dy = np.diff(values, axis=0) if values.shape[0] > 1 else np.zeros((1,), dtype=np.float32)
+        gradient = (float(np.mean(np.abs(dx))) + float(np.mean(np.abs(dy)))) / 42.0
+        return max(0.0, min(1.0, contrast * 0.62 + gradient * 0.38))
+
+    def _period_consistency(self, selected):
+        if len(selected) < 2:
+            return 1.0
+        periods = [item.get("period") for item in selected if item.get("period") is not None]
+        if len(periods) < 2:
+            return 1.0
+        np = self.np
+        values = np.array(periods, dtype=np.float32)
+        median = float(np.median(values))
+        if median <= 1e-6:
+            return 1.0
+        spread = float(np.median(np.abs(values - median))) / median
+        return max(0.45, min(1.0, 1.0 - spread * 2.4))
 
     def _smooth(self, profile):
         np = self.np
@@ -429,12 +533,27 @@ class StripeAnalyzer(object):
         if not stats:
             return None
         np = self.np
-        periods = np.array([item["period"] for item in stats], dtype=np.float32)
-        median = float(np.median(periods))
-        usable = [item for item in stats if median * 0.65 <= item["period"] <= median * 1.35]
-        if not usable:
-            return median
-        weights = np.array([max(0.05, item["corr"] * item["clarity"]) for item in usable], dtype=np.float32)
+        clusters = []
+        for item in sorted(stats, key=lambda value: value["period"]):
+            matched = None
+            for cluster in clusters:
+                center = cluster["center"]
+                if center * 0.72 <= item["period"] <= center * 1.28:
+                    matched = cluster
+                    break
+            if matched is None:
+                matched = {"items": [], "center": item["period"]}
+                clusters.append(matched)
+            matched["items"].append(item)
+            matched["center"] = float(np.median(np.array([entry["period"] for entry in matched["items"]], dtype=np.float32)))
+
+        def cluster_score(cluster):
+            support = min(1.0, len(cluster["items"]) / 3.0)
+            strength = sum(max(0.05, item.get("score", item["corr"] * item["clarity"])) for item in cluster["items"])
+            return strength * (0.70 + support * 0.30)
+
+        usable = max(clusters, key=cluster_score)["items"]
+        weights = np.array([max(0.05, item.get("score", item["corr"] * item["clarity"])) for item in usable], dtype=np.float32)
         values = np.array([item["period"] for item in usable], dtype=np.float32)
         return float(np.average(values, weights=weights))
 
@@ -470,7 +589,7 @@ class StripeAnalyzer(object):
         valid = indexes > 0
         periods = np.zeros_like(indexes)
         periods[valid] = len(values) / indexes[valid]
-        valid = (periods >= 6.0) & (periods <= min(220.0, len(values) / 2.0))
+        valid = (periods >= 8.0) & (periods <= min(220.0, len(values) / 2.0))
         if not np.any(valid):
             return None, 0.0
         valid_indices = np.where(valid)[0]
@@ -484,64 +603,173 @@ class StripeAnalyzer(object):
         return None if details is None else details["spacing"]
 
     def _peak_spacing_details(self, profile, kind, expected_period=None, sample_count=None):
-        np = self.np
-        values = profile if kind == "bright" else 1.0 - profile
-        threshold = float(np.mean(values) + np.std(values) * 0.18)
-        min_distance = int(max(5, (expected_period or len(values) / 20.0) * 0.55))
-
-        peaks = []
-        last_peak = -min_distance
-        for idx in range(2, len(values) - 2):
-            if values[idx] <= threshold:
-                continue
-            if not (values[idx] >= values[idx - 1] and values[idx] >= values[idx + 1]):
-                continue
-            prominence = values[idx] - max(min(values[idx - 2], values[idx - 1]), min(values[idx + 1], values[idx + 2]))
-            if prominence < max(0.015, float(np.std(values)) * 0.04):
-                continue
-            if idx - last_peak < min_distance:
-                if peaks and values[idx] > values[peaks[-1]]:
-                    peaks[-1] = idx
-                    last_peak = idx
-                continue
-            peaks.append(idx)
-            last_peak = idx
-
-        if len(peaks) < 2:
-            return None
-        refined_peaks = []
-        for peak in peaks:
-            if 0 < peak < len(values) - 1:
-                left = float(values[peak - 1])
-                center_value = float(values[peak])
-                right = float(values[peak + 1])
-                denom = left - 2.0 * center_value + right
-                offset = 0.0 if abs(denom) < 1e-9 else 0.5 * (left - right) / denom
-                offset = max(-0.5, min(0.5, offset))
-                refined_peaks.append(float(peak) + offset)
-            else:
-                refined_peaks.append(float(peak))
-
-        spacing_items = []
-        center = len(values) / 2.0
-        for i in range(1, len(refined_peaks)):
-            spacing = refined_peaks[i] - refined_peaks[i - 1]
-            midpoint = (refined_peaks[i] + refined_peaks[i - 1]) / 2.0
-            spacing_items.append((spacing, abs(midpoint - center)))
-
-        if expected_period:
-            spacing_items = [
-                item for item in spacing_items if expected_period * 0.65 <= item[0] <= expected_period * 1.45
-            ]
-        if not spacing_items:
+        details = self._band_center_spacing_details(profile, kind, expected_period=expected_period)
+        if details is None:
             return None
         if sample_count:
-            spacing_items = sorted(spacing_items, key=lambda item: item[1])[:sample_count]
-            spacings = [item[0] for item in spacing_items]
-            return {"spacing": float(np.mean(np.array(spacings, dtype=float))), "intervals": spacings}
+            intervals = details["spacing_samples"][:sample_count]
+            if not intervals:
+                return None
+            return {"spacing": float(self.np.mean(self.np.array(intervals, dtype=float))), "intervals": intervals}
+        return {"spacing": details["spacing_mean"], "intervals": details["spacing_samples"]}
 
-        spacings = [item[0] for item in spacing_items]
-        return {"spacing": float(np.median(np.array(spacings, dtype=float))), "intervals": spacings}
+    def _band_center_spacing_details(self, profile, kind, expected_period=None):
+        np = self.np
+        if profile is None or len(profile) < 8:
+            return None
+        values = self._normalize(self._smooth(profile if kind == "bright" else 1.0 - profile))
+        if float(np.std(values)) < 1e-6:
+            return None
+        threshold = self._adaptive_band_threshold(values)
+        segments = self._threshold_segments(values, threshold)
+        if not segments:
+            return None
+
+        min_width = max(3.0, (expected_period or len(values) / 20.0) * 0.15)
+        max_width = max(min_width + 1.0, (expected_period or len(values) / 2.0) * 0.75)
+        bands = self._bands_from_segments(values, segments, threshold, min_width, max_width)
+        if len(bands) < 4 and expected_period is not None:
+            bands = self._bands_from_segments(values, segments, threshold, 3.0, max(4.0, len(values) / 3.0))
+
+        if len(bands) < 2:
+            return None
+
+        bands = sorted(bands, key=lambda item: item["center"])
+        centers = np.array([item["center"] for item in bands], dtype=np.float32)
+        spacing_samples = np.diff(centers)
+        spacing_samples = self._select_spacing_samples(spacing_samples, expected_period)
+        if spacing_samples.size == 0:
+            return None
+
+        spacing_samples = self._remove_spacing_outliers(spacing_samples)
+        if spacing_samples.size == 0:
+            return None
+
+        spacing_mean = float(np.mean(spacing_samples))
+        spacing_std = float(np.std(spacing_samples, ddof=1)) if spacing_samples.size >= 2 else 0.0
+        spacing_sem = spacing_std / math.sqrt(float(spacing_samples.size)) if spacing_samples.size >= 1 else None
+        spacing_uncertainty = max(float(spacing_sem or 0.0), 0.2)
+        consistency = 1.0
+        if spacing_mean > 1e-6:
+            consistency = max(0.0, min(1.0, 1.0 - (spacing_std / spacing_mean) * 2.5))
+        if spacing_mean > 1e-6 and spacing_std / spacing_mean > 0.08:
+            return None
+
+        return {
+            "spacing_mean": spacing_mean,
+            "spacing_std": spacing_std,
+            "spacing_sem": spacing_sem,
+            "spacing_uncertainty": spacing_uncertainty,
+            "spacing_samples": [float(v) for v in spacing_samples.tolist()],
+            "centers": [float(v) for v in centers.tolist()],
+            "band_count": len(bands),
+            "sample_count": int(spacing_samples.size),
+            "consistency": consistency,
+        }
+
+    def _bands_from_segments(self, values, segments, threshold, min_width, max_width):
+        np = self.np
+        bands = []
+        for start, end in segments:
+            left = self._threshold_crossing(values, start - 1, start, threshold)
+            right = self._threshold_crossing(values, end, end + 1, threshold)
+            if left is None or right is None:
+                continue
+            width = right - left
+            if width < min_width or width > max_width:
+                continue
+            band_values = values[start : end + 1]
+            bands.append({
+                "left": float(left),
+                "right": float(right),
+                "center": float((left + right) * 0.5),
+                "width": float(width),
+                "strength": float(np.mean(band_values)),
+            })
+        return bands
+
+    def _select_spacing_samples(self, samples, expected_period):
+        np = self.np
+        values = np.array(samples, dtype=np.float32).ravel()
+        if values.size == 0:
+            return values
+        if expected_period is not None:
+            expected = values[(values >= expected_period * 0.65) & (values <= expected_period * 1.35)]
+            if expected.size >= 3:
+                return expected
+        return self._dominant_spacing_cluster(values)
+
+    def _dominant_spacing_cluster(self, samples):
+        np = self.np
+        values = np.array(samples, dtype=np.float32).ravel()
+        if values.size < 3:
+            return values
+        clusters = []
+        for value in sorted(float(v) for v in values.tolist()):
+            matched = None
+            for cluster in clusters:
+                center = cluster["center"]
+                if center * 0.72 <= value <= center * 1.28:
+                    matched = cluster
+                    break
+            if matched is None:
+                matched = {"center": value, "values": []}
+                clusters.append(matched)
+            matched["values"].append(value)
+            matched["center"] = float(np.median(np.array(matched["values"], dtype=np.float32)))
+
+        def score(cluster):
+            vals = np.array(cluster["values"], dtype=np.float32)
+            mean = float(np.mean(vals))
+            spread = float(np.std(vals)) / max(mean, 1e-6) if vals.size > 1 else 0.0
+            return vals.size - spread
+
+        best = max(clusters, key=score)
+        return np.array(best["values"], dtype=np.float32)
+
+    def _adaptive_band_threshold(self, values):
+        np = self.np
+        p35 = float(np.percentile(values, 35))
+        p85 = float(np.percentile(values, 85))
+        return p35 + 0.45 * max(p85 - p35, 1e-6)
+
+    def _threshold_segments(self, values, threshold):
+        segments = []
+        start = None
+        for idx, value in enumerate(values):
+            if value >= threshold:
+                if start is None:
+                    start = idx
+            elif start is not None:
+                segments.append((start, idx - 1))
+                start = None
+        if start is not None:
+            segments.append((start, len(values) - 1))
+        return segments
+
+    def _threshold_crossing(self, values, left_idx, right_idx, threshold):
+        if left_idx < 0 or right_idx >= len(values):
+            return None
+        left = float(values[left_idx])
+        right = float(values[right_idx])
+        if abs(right - left) < 1e-9:
+            return float(left_idx)
+        ratio = (threshold - left) / (right - left)
+        ratio = max(0.0, min(1.0, ratio))
+        return float(left_idx) + ratio
+
+    def _remove_spacing_outliers(self, samples):
+        np = self.np
+        values = np.array(samples, dtype=np.float32).ravel()
+        if values.size < 3:
+            return values
+        median = float(np.median(values))
+        mad = float(np.median(np.abs(values - median)))
+        if mad < 1e-6:
+            return values
+        limit = max(0.2, mad * 3.5 * 1.4826)
+        filtered = values[np.abs(values - median) <= limit]
+        return filtered if filtered.size >= 2 else values
 
     def _fringe_contrast(self, gray):
         np = self.np

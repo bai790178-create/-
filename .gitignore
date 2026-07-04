@@ -11,3 +11,6 @@ experiments/*
 build/
 dist/
 *.spec
+*.zip
+report_extracted/
+report_sources/
