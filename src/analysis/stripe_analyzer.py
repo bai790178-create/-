@@ -144,7 +144,7 @@ class StripeAnalyzer(object):
 
         return np.ascontiguousarray(enhanced)
 
-    def calculate_calibrated_contrast(self, stripe_frame, background_frame, dark_frame):
+    def calculate_calibrated_contrast(self, stripe_frame, background_frame, dark_frame, options=None):
         if not self._ready():
             return {"status": "missing_dependency", "message": self._dependency_result().message}
         if dark_frame is None:
@@ -161,6 +161,7 @@ class StripeAnalyzer(object):
             if dark.shape != background.shape or dark.shape != stripe.shape:
                 return {"status": "shape_mismatch", "message": "暗场图、背景图和条纹图尺寸不一致。"}
 
+            options = options or {}
             eps = self.np.float32(1e-6)
             stripe_corr = self.np.maximum(stripe - dark, self.np.float32(0.0))
             bg_corr = background - dark
@@ -168,24 +169,54 @@ class StripeAnalyzer(object):
                 return {"status": "invalid_background", "message": "背景图扣除暗场后强度过低，无法计算衬比度。"}
 
             corrected = stripe_corr / self.np.maximum(bg_corr, eps)
-            roi = self._center_crop(corrected)
+            roi = self._contrast_roi(corrected, options.get("roi"))
+            stripe_roi = self._contrast_roi(stripe, options.get("roi"))
             if roi.size == 0:
                 return {"status": "need_roi", "message": "有效分析区域为空。"}
 
-            contrast = self._fringe_contrast(roi)
-            return {
-                "status": "ok",
-                "message": "已完成暗场/背景校正衬比度计算。",
-                "gamma": self._round(contrast["gamma"]),
-                "i_max": self._round(contrast["i_max"]),
-                "i_min": self._round(contrast["i_min"]),
+            result = self._profile_fringe_contrast(roi, stripe_roi)
+            fallback = self._fringe_contrast(roi)
+            if result.get("usable_band_count", 0) < 1 or result.get("valid_pair_count", 0) < 3:
+                result.update({
+                    "status": "ok",
+                    "message": "峰谷质量不足，已使用分位数统计估计衬比度；建议重新框选 ROI 或改善照明。",
+                    "method": "percentile_fallback",
+                    "gamma": fallback["gamma"],
+                    "i_max": fallback["i_max"],
+                    "i_min": fallback["i_min"],
+                    "quality_status": "低可信",
+                })
+            else:
+                result.update({
+                    "status": "ok",
+                    "message": "已按多条带峰谷法完成暗场/背景校正衬比度计算。",
+                    "method": "multi_band_peak_valley",
+                })
+            result.update({
+                "gamma": self._round_digits(result.get("gamma"), 5),
+                "gamma_std": self._round_digits(result.get("gamma_std"), 5),
+                "i_max": self._round_digits(result.get("i_max"), 4),
+                "i_min": self._round_digits(result.get("i_min"), 4),
                 "roi_height": int(roi.shape[0]),
                 "roi_width": int(roi.shape[1]),
                 "image_height": int(stripe.shape[0]),
                 "image_width": int(stripe.shape[1]),
-            }
+            })
+            return result
         except Exception as exc:
             return {"status": "contrast_error", "message": str(exc)}
+
+    def dark_subtracted_contrast_image(self, stripe_frame, dark_frame):
+        if not self._ready() or stripe_frame is None or dark_frame is None:
+            return None
+        try:
+            dark = self._gray_float(dark_frame)
+            stripe = self._gray_float(stripe_frame)
+            if dark.shape != stripe.shape:
+                return None
+            return self._display_gray(self.np.maximum(stripe - dark, self.np.float32(0.0)))
+        except Exception:
+            return None
 
     def corrected_contrast_image(self, stripe_frame, background_frame, dark_frame):
         if not self._ready() or stripe_frame is None or background_frame is None or dark_frame is None:
@@ -284,6 +315,301 @@ class StripeAnalyzer(object):
         if h < 16 or w < 16:
             return gray
         return gray[int(h * 0.12) : int(h * 0.88), int(w * 0.08) : int(w * 0.92)]
+
+    def _contrast_roi(self, gray, roi):
+        if roi:
+            return self._crop_roi(gray, roi)
+        return self._center_crop(gray)
+
+    def _profile_fringe_contrast(self, roi, stripe_roi):
+        candidates = [
+            self._profile_contrast_candidate(roi, stripe_roi, axis=0, orientation="vertical"),
+            self._profile_contrast_candidate(roi, stripe_roi, axis=1, orientation="horizontal"),
+        ]
+        candidates = [item for item in candidates if item is not None]
+        if not candidates:
+            return {
+                "gamma": None,
+                "gamma_std": None,
+                "i_max": None,
+                "i_min": None,
+                "valid_pair_count": 0,
+                "total_pair_count": 0,
+                "quality_status": "低可信",
+                "orientation": "--",
+                "profile": [],
+            }
+        return max(candidates, key=lambda item: (item["valid_pair_count"], item["score"]))
+
+    def _profile_contrast_candidate(self, roi, stripe_roi, axis, orientation):
+        np = self.np
+        if roi is None or roi.size == 0:
+            return None
+        bands = self._contrast_bands(roi, stripe_roi, axis)
+        band_results = []
+        for band, stripe_band in bands:
+            result = self._single_profile_contrast(band, stripe_band, axis)
+            if result is not None:
+                band_results.append(result)
+        if not band_results:
+            return None
+
+        usable = [item for item in band_results if item["valid_pair_count"] >= 3]
+        if usable:
+            gamma_values = np.array([item["gamma"] for item in usable], dtype=np.float32)
+            gamma_std_values = [item["gamma_std"] for item in usable if item["gamma_std"] is not None]
+            i_max_values = np.array([item["i_max"] for item in usable], dtype=np.float32)
+            i_min_values = np.array([item["i_min"] for item in usable], dtype=np.float32)
+            gamma = float(np.median(gamma_values))
+            between_band_std = float(np.std(gamma_values, ddof=1)) if gamma_values.size >= 2 else 0.0
+            within_band_std = float(np.median(np.array(gamma_std_values, dtype=np.float32))) if gamma_std_values else 0.0
+            gamma_std = max(between_band_std, within_band_std)
+            i_max = float(np.median(i_max_values))
+            i_min = float(np.median(i_min_values))
+        else:
+            gamma = None
+            gamma_std = None
+            i_max = None
+            i_min = None
+
+        valid_count = sum(item["valid_pair_count"] for item in band_results)
+        total_count = sum(item["total_pair_count"] for item in band_results)
+        usable_count = len(usable)
+        total_bands = len(band_results)
+        if usable_count >= 3 and valid_count >= 8:
+            quality_status = "良好：{}/{} 条带".format(usable_count, total_bands)
+        elif usable_count >= 2 and valid_count >= 5:
+            quality_status = "可用：{}/{} 条带".format(usable_count, total_bands)
+        elif usable_count >= 1:
+            quality_status = "低可信：{}/{} 条带".format(usable_count, total_bands)
+        else:
+            quality_status = "不可用：0/{} 条带".format(total_bands)
+
+        best_profile = max(band_results, key=lambda item: item["score"])
+        period_values = [item["estimated_period_px"] for item in band_results if item.get("estimated_period_px") is not None]
+        score = valid_count + usable_count * 2.0 + sum(max(0.0, item.get("score", 0.0)) for item in band_results) / max(total_bands, 1)
+        return {
+            "gamma": gamma,
+            "gamma_std": gamma_std,
+            "i_max": i_max,
+            "i_min": i_min,
+            "valid_pair_count": valid_count,
+            "total_pair_count": total_count,
+            "quality_status": quality_status,
+            "orientation": orientation,
+            "usable_band_count": usable_count,
+            "total_band_count": total_bands,
+            "estimated_period_px": self._round(float(np.median(np.array(period_values, dtype=np.float32))) if period_values else None),
+            "smoothing_window": best_profile.get("smoothing_window"),
+            "profile": best_profile.get("profile", []),
+            "score": score,
+        }
+
+    def _single_profile_contrast(self, band, stripe_band, axis):
+        np = self.np
+        raw_profile = self._robust_projection(band, axis)
+        if raw_profile is None or raw_profile.size < 12:
+            return None
+
+        normalized = self._normalize(raw_profile)
+        period, corr = self._estimate_period(self._smooth(normalized))
+        window = self._contrast_smoothing_window(period)
+        smooth_profile = self._moving_average(raw_profile, window)
+        peaks = self._local_extrema(smooth_profile, "peak")
+        valleys = self._local_extrema(smooth_profile, "valley")
+        saturation_profile = stripe_band.max(axis=axis).astype(np.float32) if stripe_band is not None and stripe_band.size else None
+        pair_info = self._contrast_peak_valley_pairs(raw_profile, peaks, valleys, period, saturation_profile)
+        gammas = pair_info["gammas"]
+
+        if gammas:
+            gamma_values = np.array(gammas, dtype=np.float32)
+            i_max_values = np.array(pair_info["i_max_values"], dtype=np.float32)
+            i_min_values = np.array(pair_info["i_min_values"], dtype=np.float32)
+            gamma = float(np.median(gamma_values))
+            gamma_std = float(np.std(gamma_values, ddof=1)) if gamma_values.size >= 2 else 0.0
+            i_max = float(np.median(i_max_values))
+            i_min = float(np.median(i_min_values))
+        else:
+            gamma = None
+            gamma_std = None
+            i_max = None
+            i_min = None
+
+        score = len(gammas) + max(0.0, corr) + self._clarity(normalized)
+        return {
+            "gamma": gamma,
+            "gamma_std": gamma_std,
+            "i_max": i_max,
+            "i_min": i_min,
+            "valid_pair_count": len(gammas),
+            "total_pair_count": pair_info["total_pair_count"],
+            "estimated_period_px": self._round(period),
+            "smoothing_window": window,
+            "profile": [self._round(float(v)) for v in self._normalize(smooth_profile).tolist()],
+            "score": score,
+        }
+
+    def _contrast_bands(self, roi, stripe_roi, axis):
+        h, w = roi.shape[:2]
+        split_axis = 0 if axis == 0 else 1
+        length = h if split_axis == 0 else w
+        band_count = 5 if length >= 60 else 3 if length >= 30 else 1
+        bands = []
+        for start, end in self._even_slices(length, band_count):
+            if end - start < 5:
+                continue
+            if split_axis == 0:
+                band = roi[start:end, :]
+                stripe_band = stripe_roi[start:end, :] if stripe_roi is not None and stripe_roi.size else None
+            else:
+                band = roi[:, start:end]
+                stripe_band = stripe_roi[:, start:end] if stripe_roi is not None and stripe_roi.size else None
+            bands.append((band, stripe_band))
+        return bands
+
+    def _even_slices(self, length, count):
+        if count <= 1:
+            return [(0, length)]
+        slices = []
+        for idx in range(count):
+            start = int(round(idx * length / float(count)))
+            end = int(round((idx + 1) * length / float(count)))
+            slices.append((start, end))
+        return slices
+
+    def _robust_projection(self, band, axis):
+        np = self.np
+        values = band.astype(np.float32)
+        thickness = values.shape[0] if axis == 0 else values.shape[1]
+        if thickness < 5:
+            return None
+        if thickness < 12:
+            return np.median(values, axis=axis).astype(np.float32)
+        trim = int(thickness * 0.10)
+        if trim < 1:
+            return values.mean(axis=axis).astype(np.float32)
+        sorted_values = np.sort(values, axis=axis)
+        if axis == 0:
+            trimmed = sorted_values[trim:thickness - trim, :]
+        else:
+            trimmed = sorted_values[:, trim:thickness - trim]
+        if trimmed.size == 0:
+            return np.median(values, axis=axis).astype(np.float32)
+        return trimmed.mean(axis=axis).astype(np.float32)
+
+    def _contrast_peak_valley_pairs(self, raw_profile, peaks, valleys, expected_period, saturation_profile):
+        np = self.np
+        peaks = sorted(int(v) for v in peaks)
+        valleys = sorted(int(v) for v in valleys)
+        profile_range = self._robust_profile_range(raw_profile)
+        noise_floor = self._profile_noise_floor(raw_profile)
+        min_diff = max(profile_range * 0.06, noise_floor * 2.5, 1e-6)
+        radius = self._peak_value_radius(expected_period)
+        total_pair_count = 0
+        gammas = []
+        i_max_values = []
+        i_min_values = []
+
+        for peak in peaks:
+            left_candidates = [valley for valley in valleys if valley < peak]
+            right_candidates = [valley for valley in valleys if valley > peak]
+            if not left_candidates or not right_candidates:
+                continue
+            left_valley = left_candidates[-1]
+            right_valley = right_candidates[0]
+            total_pair_count += 1
+
+            if expected_period is not None:
+                left_dist = peak - left_valley
+                right_dist = right_valley - peak
+                min_dist = max(2.0, expected_period * 0.20)
+                max_dist = max(min_dist + 1.0, expected_period * 0.85)
+                if left_dist < min_dist or left_dist > max_dist or right_dist < min_dist or right_dist > max_dist:
+                    continue
+
+            if saturation_profile is not None and self._local_profile_value(saturation_profile, peak, radius, "max") >= 254.0:
+                continue
+
+            i_max = self._local_profile_value(raw_profile, peak, radius, "max")
+            i_min_left = self._local_profile_value(raw_profile, left_valley, radius, "min")
+            i_min_right = self._local_profile_value(raw_profile, right_valley, radius, "min")
+            i_min = (i_min_left + i_min_right) * 0.5
+            if i_max - i_min < min_diff:
+                continue
+            denom = i_max + i_min
+            if denom <= 1e-9:
+                continue
+            gamma = max(0.0, min(1.0, (i_max - i_min) / denom))
+            gammas.append(gamma)
+            i_max_values.append(i_max)
+            i_min_values.append(i_min)
+
+        return {
+            "gammas": gammas,
+            "i_max_values": i_max_values,
+            "i_min_values": i_min_values,
+            "total_pair_count": total_pair_count,
+        }
+
+    def _contrast_smoothing_window(self, period):
+        if period is None:
+            window = 5
+        else:
+            window = int(round(float(period) * 0.12))
+            window = max(5, min(21, window))
+        if window % 2 == 0:
+            window += 1
+        return window
+
+    def _peak_value_radius(self, period):
+        if period is None:
+            return 2
+        return max(1, min(5, int(round(float(period) * 0.06))))
+
+    def _moving_average(self, profile, window):
+        np = self.np
+        window = max(1, int(window))
+        if window <= 1 or len(profile) < window:
+            return profile.astype(np.float32)
+        kernel = np.ones(window, dtype=np.float32) / np.float32(window)
+        return np.convolve(profile.astype(np.float32), kernel, mode="same")
+
+    def _robust_profile_range(self, profile):
+        if profile is None or len(profile) == 0:
+            return 0.0
+        return float(self.np.percentile(profile, 95) - self.np.percentile(profile, 5))
+
+    def _profile_noise_floor(self, profile):
+        if profile is None or len(profile) < 7:
+            return 0.0
+        smooth = self._moving_average(profile, 5)
+        residual = profile.astype(self.np.float32) - smooth.astype(self.np.float32)
+        mad = float(self.np.median(self.np.abs(residual - float(self.np.median(residual)))))
+        return mad * 1.4826
+
+    def _local_extrema(self, values, kind):
+        if values is None or len(values) < 3:
+            return []
+        result = []
+        for idx in range(1, len(values) - 1):
+            left = values[idx - 1]
+            center = values[idx]
+            right = values[idx + 1]
+            if kind == "peak" and center > left and center >= right:
+                result.append(idx)
+            elif kind == "valley" and center < left and center <= right:
+                result.append(idx)
+        return result
+
+    def _local_profile_value(self, profile, index, radius, mode):
+        start = max(0, int(index) - int(radius))
+        end = min(len(profile), int(index) + int(radius) + 1)
+        values = profile[start:end]
+        if values.size == 0:
+            return float(profile[int(index)])
+        if mode == "min":
+            return float(self.np.min(values))
+        return float(self.np.max(values))
 
     def _prepare_gray(self, gray):
         np = self.np
@@ -794,3 +1120,6 @@ class StripeAnalyzer(object):
 
     def _round(self, value):
         return None if value is None else round(float(value), 3)
+
+    def _round_digits(self, value, digits):
+        return None if value is None else round(float(value), int(digits))
