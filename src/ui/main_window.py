@@ -267,19 +267,23 @@ class MainWindow(QMainWindow):
         self.capture_dark_btn = QPushButton("拍暗场图")
         self.capture_stripe_contrast_btn = QPushButton("拍条纹图并计算")
         self.realtime_contrast_btn = QPushButton("开始实时衬比度")
+        self.save_contrast_btn = QPushButton("保存衬比度结果")
         self.clear_contrast_btn = QPushButton("清空")
         self.capture_stripe_contrast_btn.setObjectName("accentButton")
         self.realtime_contrast_btn.setObjectName("primaryButton")
+        self.save_contrast_btn.setObjectName("accentButton")
         for button in (self.capture_dark_btn, self.clear_contrast_btn):
             button.setObjectName("secondaryButton")
         self._decorate_button(self.capture_dark_btn, QStyle.SP_DialogYesButton)
         self._decorate_button(self.capture_stripe_contrast_btn, QStyle.SP_ComputerIcon)
         self._decorate_button(self.realtime_contrast_btn, QStyle.SP_BrowserReload)
+        self._decorate_button(self.save_contrast_btn, QStyle.SP_DialogSaveButton)
         self._decorate_button(self.clear_contrast_btn, QStyle.SP_DialogResetButton)
         capture_layout.addWidget(self.capture_dark_btn, 0, 0, 1, 2)
         capture_layout.addWidget(self.capture_stripe_contrast_btn, 1, 0, 1, 2)
         capture_layout.addWidget(self.realtime_contrast_btn, 2, 0, 1, 2)
-        capture_layout.addWidget(self.clear_contrast_btn, 3, 0, 1, 2)
+        capture_layout.addWidget(self.save_contrast_btn, 3, 0, 1, 2)
+        capture_layout.addWidget(self.clear_contrast_btn, 4, 0, 1, 2)
 
         status = QGroupBox("采集状态")
         status.setObjectName("paramsPanel")
@@ -572,6 +576,7 @@ class MainWindow(QMainWindow):
         self.capture_dark_btn.clicked.connect(self.capture_contrast_dark)
         self.capture_stripe_contrast_btn.clicked.connect(self.capture_contrast_stripe)
         self.realtime_contrast_btn.clicked.connect(self.toggle_realtime_contrast)
+        self.save_contrast_btn.clicked.connect(self.save_contrast_result)
         self.clear_contrast_btn.clicked.connect(self.clear_contrast)
 
     def _decorate_button(self, button, standard_pixmap):
@@ -1157,6 +1162,29 @@ class MainWindow(QMainWindow):
     def _round_result_um(self, spacing_px):
         pixel_scale = self._float_value(self.pixel_scale.text(), 1.0)
         return round(float(spacing_px) * pixel_scale, 3)
+
+    def save_contrast_result(self):
+        if not self.contrast_result or self.contrast_result.get("gamma") is None:
+            self._log("当前没有可保存的衬比度结果。")
+            QMessageBox.warning(self, "无法保存", "请先采集暗场图并完成条纹图衬比度计算。")
+            return
+        try:
+            params = self._params()
+            params["record_type"] = "contrast"
+            folder = self.store.create_experiment(params)
+            self.store.save_contrast(self.contrast_result)
+            if self.contrast_dark_frame is not None:
+                self.store.save_image("contrast_dark.png", self.contrast_dark_frame)
+            if self.contrast_stripe_frame is not None:
+                self.store.save_image("contrast_stripe.png", self.contrast_stripe_frame)
+            if self.contrast_dark_subtracted_frame is not None:
+                self.store.save_image("contrast_dark_subtracted.png", self.contrast_dark_subtracted_frame)
+            self.store.append_log("衬比度结果保存完成。")
+            self._log("衬比度结果已保存：{}".format(folder))
+            QMessageBox.information(self, "保存完成", "衬比度结果已保存到：\n{}".format(folder))
+        except Exception as exc:
+            self._log("衬比度结果保存失败：{}".format(exc))
+            QMessageBox.critical(self, "保存失败", str(exc))
 
     def save_experiment(self):
         params = self._params()
