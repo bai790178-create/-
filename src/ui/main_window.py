@@ -171,7 +171,6 @@ class MainWindow(QMainWindow):
         self.realtime_outlier_count = 0
         self.realtime_hold_count = 0
         self.contrast_dark_frame = None
-        self.contrast_background_frame = None
         self.contrast_stripe_frame = None
         self.contrast_dark_subtracted_frame = None
         self.contrast_corrected_frame = None
@@ -245,7 +244,7 @@ class MainWindow(QMainWindow):
         main_preview = QHBoxLayout()
         main_preview.setSpacing(10)
         self.contrast_original_preview_label = QLabel("打开相机后显示原图")
-        self.contrast_corrected_preview_label = QLabel("完成采集后显示背景校正增强图")
+        self.contrast_corrected_preview_label = QLabel("采集暗场图后显示暗场参考")
         for label in (self.contrast_original_preview_label, self.contrast_corrected_preview_label):
             label.setObjectName("previewLabel")
             label.setAlignment(Qt.AlignCenter)
@@ -253,21 +252,6 @@ class MainWindow(QMainWindow):
             label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             main_preview.addWidget(label, 1)
         preview_layout.addLayout(main_preview, 1)
-        thumbs = QGroupBox("参考图像")
-        thumbs.setObjectName("scanPanel")
-        thumb_layout = QGridLayout(thumbs)
-        thumb_layout.setContentsMargins(12, 22, 12, 12)
-        thumb_layout.setHorizontalSpacing(10)
-        thumb_layout.setVerticalSpacing(8)
-        self.contrast_dark_image = self._build_contrast_thumbnail("暗场图")
-        self.contrast_background_image = self._build_contrast_thumbnail("背景图")
-        self.contrast_stripe_image = self._build_contrast_thumbnail("原图")
-        self.contrast_corrected_image = self._build_contrast_thumbnail("原图减暗场")
-        thumb_layout.addWidget(self.contrast_dark_image, 0, 0)
-        thumb_layout.addWidget(self.contrast_background_image, 0, 1)
-        thumb_layout.addWidget(self.contrast_stripe_image, 0, 2)
-        thumb_layout.addWidget(self.contrast_corrected_image, 0, 3)
-        preview_layout.addWidget(thumbs)
 
         side = QWidget()
         side_layout = QVBoxLayout(side)
@@ -281,21 +265,18 @@ class MainWindow(QMainWindow):
         capture_layout.setHorizontalSpacing(10)
         capture_layout.setVerticalSpacing(10)
         self.capture_dark_btn = QPushButton("拍暗场图")
-        self.capture_background_btn = QPushButton("拍背景图")
         self.capture_stripe_contrast_btn = QPushButton("拍条纹图并计算")
         self.realtime_contrast_btn = QPushButton("开始实时衬比度")
         self.clear_contrast_btn = QPushButton("清空")
         self.capture_stripe_contrast_btn.setObjectName("accentButton")
         self.realtime_contrast_btn.setObjectName("primaryButton")
-        for button in (self.capture_dark_btn, self.capture_background_btn, self.clear_contrast_btn):
+        for button in (self.capture_dark_btn, self.clear_contrast_btn):
             button.setObjectName("secondaryButton")
         self._decorate_button(self.capture_dark_btn, QStyle.SP_DialogYesButton)
-        self._decorate_button(self.capture_background_btn, QStyle.SP_DialogYesButton)
         self._decorate_button(self.capture_stripe_contrast_btn, QStyle.SP_ComputerIcon)
         self._decorate_button(self.realtime_contrast_btn, QStyle.SP_BrowserReload)
         self._decorate_button(self.clear_contrast_btn, QStyle.SP_DialogResetButton)
-        capture_layout.addWidget(self.capture_dark_btn, 0, 0)
-        capture_layout.addWidget(self.capture_background_btn, 0, 1)
+        capture_layout.addWidget(self.capture_dark_btn, 0, 0, 1, 2)
         capture_layout.addWidget(self.capture_stripe_contrast_btn, 1, 0, 1, 2)
         capture_layout.addWidget(self.realtime_contrast_btn, 2, 0, 1, 2)
         capture_layout.addWidget(self.clear_contrast_btn, 3, 0, 1, 2)
@@ -305,12 +286,10 @@ class MainWindow(QMainWindow):
         status_layout = QFormLayout(status)
         status_layout.setContentsMargins(14, 24, 14, 14)
         self.contrast_dark_status = QLabel("--")
-        self.contrast_background_status = QLabel("--")
         self.contrast_stripe_status = QLabel("--")
-        for label in (self.contrast_dark_status, self.contrast_background_status, self.contrast_stripe_status):
+        for label in (self.contrast_dark_status, self.contrast_stripe_status):
             label.setObjectName("resultValue")
         status_layout.addRow("暗场图", self.contrast_dark_status)
-        status_layout.addRow("背景图", self.contrast_background_status)
         status_layout.addRow("条纹图", self.contrast_stripe_status)
 
         results = QGroupBox("衬比度结果")
@@ -335,7 +314,7 @@ class MainWindow(QMainWindow):
         result_layout.addRow("Imax", self.contrast_i_max_label)
         result_layout.addRow("Imin", self.contrast_i_min_label)
         result_layout.addRow("不确定度", self.contrast_uncertainty_label)
-        result_layout.addRow("有效峰谷", self.contrast_pair_label)
+        result_layout.addRow("有效像素", self.contrast_pair_label)
         result_layout.addRow("质量", self.contrast_quality_label)
         result_layout.addRow("采样区域", self.contrast_roi_label)
         result_layout.addRow("状态", self.contrast_state_label)
@@ -591,7 +570,6 @@ class MainWindow(QMainWindow):
         self.backend_select.currentIndexChanged.connect(self.refresh_cameras)
         self.clear_roi_btn.clicked.connect(lambda: self.clear_roi())
         self.capture_dark_btn.clicked.connect(self.capture_contrast_dark)
-        self.capture_background_btn.clicked.connect(self.capture_contrast_background)
         self.capture_stripe_contrast_btn.clicked.connect(self.capture_contrast_stripe)
         self.realtime_contrast_btn.clicked.connect(self.toggle_realtime_contrast)
         self.clear_contrast_btn.clicked.connect(self.clear_contrast)
@@ -976,27 +954,11 @@ class MainWindow(QMainWindow):
         self.contrast_dark_subtracted_frame = None
         self.contrast_corrected_frame = None
         self.contrast_result = None
-        self._show_frame_on_label(self.contrast_dark_frame, self.contrast_dark_image)
-        self._reset_contrast_thumbnail(self.contrast_corrected_image, "原图减暗场")
-        self._reset_single_contrast_preview(self.contrast_corrected_preview_label, "完成采集后显示背景校正增强图")
+        self._show_frame_on_label(self.contrast_dark_frame, self.contrast_corrected_preview_label)
+        self._reset_single_contrast_preview(self.contrast_original_preview_label, "采集条纹图后显示")
         self._update_contrast_statuses()
         self._display_contrast_result(None)
         self._log("已采集衬比度暗场图。")
-
-    def capture_contrast_background(self):
-        frame = self._copy_current_frame_for_contrast("背景图")
-        if frame is None:
-            return
-        self.contrast_background_frame = frame
-        self.contrast_dark_subtracted_frame = None
-        self.contrast_corrected_frame = None
-        self.contrast_result = None
-        self._show_frame_on_label(self.contrast_background_frame, self.contrast_background_image)
-        self._reset_contrast_thumbnail(self.contrast_corrected_image, "原图减暗场")
-        self._reset_single_contrast_preview(self.contrast_corrected_preview_label, "完成采集后显示背景校正增强图")
-        self._update_contrast_statuses()
-        self._display_contrast_result(None)
-        self._log("已采集衬比度背景图。")
 
     def capture_contrast_stripe(self):
         frame = self._copy_current_frame_for_contrast("条纹图")
@@ -1013,10 +975,9 @@ class MainWindow(QMainWindow):
         self.contrast_dark_subtracted_frame = None
         self.contrast_corrected_frame = None
         self._show_frame_on_label(self.contrast_stripe_frame, self.contrast_original_preview_label)
-        self._show_frame_on_label(self.contrast_stripe_frame, self.contrast_stripe_image)
         self.contrast_result = self.analyzer.calculate_calibrated_contrast(
             self.contrast_stripe_frame,
-            self.contrast_background_frame,
+            None,
             self.contrast_dark_frame,
             self._analysis_options(),
         )
@@ -1025,19 +986,9 @@ class MainWindow(QMainWindow):
             self.contrast_dark_frame,
         )
         if self.contrast_dark_subtracted_frame is not None:
-            self._show_frame_on_label(self.contrast_dark_subtracted_frame, self.contrast_corrected_image)
+            self._show_frame_on_label(self.contrast_dark_frame, self.contrast_corrected_preview_label)
         else:
-            self._reset_contrast_thumbnail(self.contrast_corrected_image, "原图减暗场")
-        if self.contrast_result.get("status") == "ok":
-            self.contrast_corrected_frame = self.analyzer.corrected_contrast_image(
-                self.contrast_stripe_frame,
-                self.contrast_background_frame,
-                self.contrast_dark_frame,
-            )
-            if self.contrast_corrected_frame is not None:
-                self._show_frame_on_label(self.contrast_corrected_frame, self.contrast_corrected_preview_label)
-        else:
-            self._reset_single_contrast_preview(self.contrast_corrected_preview_label, "完成采集后显示背景校正增强图")
+            self._reset_single_contrast_preview(self.contrast_corrected_preview_label, "采集暗场图后显示暗场参考")
         self._update_contrast_statuses()
         self._display_contrast_result(self.contrast_result)
 
@@ -1045,15 +996,10 @@ class MainWindow(QMainWindow):
         self.contrast_realtime_enabled = False
         self.realtime_contrast_btn.setText("开始实时衬比度")
         self.contrast_dark_frame = None
-        self.contrast_background_frame = None
         self.contrast_stripe_frame = None
         self.contrast_dark_subtracted_frame = None
         self.contrast_corrected_frame = None
         self.contrast_result = None
-        self._reset_contrast_thumbnail(self.contrast_dark_image, "暗场图")
-        self._reset_contrast_thumbnail(self.contrast_background_image, "背景图")
-        self._reset_contrast_thumbnail(self.contrast_stripe_image, "原图")
-        self._reset_contrast_thumbnail(self.contrast_corrected_image, "原图减暗场")
         self._reset_contrast_main_previews()
         self._update_contrast_statuses()
         self._display_contrast_result(None)
@@ -1069,7 +1015,6 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "contrast_dark_status"):
             return
         self.contrast_dark_status.setText(self._contrast_frame_status(self.contrast_dark_frame))
-        self.contrast_background_status.setText(self._contrast_frame_status(self.contrast_background_frame))
         self.contrast_stripe_status.setText(self._contrast_frame_status(self.contrast_stripe_frame))
 
     def _contrast_frame_status(self, frame):
@@ -1113,8 +1058,6 @@ class MainWindow(QMainWindow):
         self.contrast_state_label.setText("{}：{}".format(result.get("status", ""), result.get("message", "")))
 
     def _reset_contrast_thumbnail(self, label, text):
-        if not hasattr(self, "contrast_dark_image"):
-            return
         label.clear()
         label.setText(text)
         label.setAlignment(Qt.AlignCenter)
@@ -1123,7 +1066,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "contrast_original_preview_label"):
             return
         self._reset_single_contrast_preview(self.contrast_original_preview_label, "打开相机后显示原图")
-        self._reset_single_contrast_preview(self.contrast_corrected_preview_label, "完成采集后显示背景校正增强图")
+        self._reset_single_contrast_preview(self.contrast_corrected_preview_label, "采集暗场图后显示暗场参考")
 
     def _reset_single_contrast_preview(self, label, text):
         label.clear()
@@ -1132,8 +1075,8 @@ class MainWindow(QMainWindow):
 
     def toggle_realtime_contrast(self):
         if not self.contrast_realtime_enabled:
-            if self.contrast_dark_frame is None or self.contrast_background_frame is None:
-                self._log("实时衬比度需要先采集暗场图和背景图。")
+            if self.contrast_dark_frame is None:
+                self._log("实时衬比度需要先采集暗场图。")
                 return
             if self.current_frame is None:
                 self._log("当前没有可用于实时衬比度分析的相机帧。")
@@ -1226,8 +1169,6 @@ class MainWindow(QMainWindow):
             self.store.save_contrast(self.contrast_result)
             if self.contrast_dark_frame is not None:
                 self.store.save_image("contrast_dark.png", self.contrast_dark_frame)
-            if self.contrast_background_frame is not None:
-                self.store.save_image("contrast_background.png", self.contrast_background_frame)
             if self.contrast_stripe_frame is not None:
                 self.store.save_image("contrast_stripe.png", self.contrast_stripe_frame)
             if self.contrast_dark_subtracted_frame is not None:

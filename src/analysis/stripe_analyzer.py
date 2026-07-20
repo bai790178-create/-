@@ -149,26 +149,26 @@ class StripeAnalyzer(object):
             return {"status": "missing_dependency", "message": self._dependency_result().message}
         if dark_frame is None:
             return {"status": "missing_dark", "message": "请先拍暗场图。"}
-        if background_frame is None:
-            return {"status": "missing_background", "message": "请先拍背景图。"}
         if stripe_frame is None:
             return {"status": "missing_stripe", "message": "请先拍条纹图。"}
 
         try:
             dark = self._gray_float(dark_frame)
-            background = self._gray_float(background_frame)
+            background = self._gray_float(background_frame) if background_frame is not None else None
             stripe = self._gray_float(stripe_frame)
-            if dark.shape != background.shape or dark.shape != stripe.shape:
-                return {"status": "shape_mismatch", "message": "暗场图、背景图和条纹图尺寸不一致。"}
+            if dark.shape != stripe.shape or (background is not None and dark.shape != background.shape):
+                return {"status": "shape_mismatch", "message": "暗场图和条纹图尺寸不一致。"}
 
             options = options or {}
             eps = self.np.float32(1e-6)
             stripe_corr = self.np.maximum(stripe - dark, self.np.float32(0.0))
-            bg_corr = background - dark
-            if float(self.np.max(bg_corr)) <= eps:
-                return {"status": "invalid_background", "message": "背景图扣除暗场后强度过低，无法计算衬比度。"}
-
-            corrected = stripe_corr / self.np.maximum(bg_corr, eps)
+            if background is None:
+                corrected = stripe_corr
+            else:
+                bg_corr = background - dark
+                if float(self.np.max(bg_corr)) <= eps:
+                    return {"status": "invalid_background", "message": "背景图扣除暗场后强度过低，无法计算衬比度。"}
+                corrected = stripe_corr / self.np.maximum(bg_corr, eps)
             roi = self._contrast_roi(corrected, options.get("roi"))
             if roi.size == 0:
                 return {"status": "need_roi", "message": "有效分析区域为空。"}
@@ -176,7 +176,7 @@ class StripeAnalyzer(object):
             result = self._fft_demodulated_contrast(roi)
             result.update({
                 "status": "ok",
-                "message": "已按二维傅里叶解调法完成暗场/背景校正衬比度计算。",
+                "message": "已按二维傅里叶解调法完成暗场校正衬比度计算。",
                 "method": "fft_demodulation",
             })
             result.update({
