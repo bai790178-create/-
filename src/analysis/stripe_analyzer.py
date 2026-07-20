@@ -170,28 +170,15 @@ class StripeAnalyzer(object):
 
             corrected = stripe_corr / self.np.maximum(bg_corr, eps)
             roi = self._contrast_roi(corrected, options.get("roi"))
-            stripe_roi = self._contrast_roi(stripe, options.get("roi"))
             if roi.size == 0:
                 return {"status": "need_roi", "message": "有效分析区域为空。"}
 
-            result = self._profile_fringe_contrast(roi, stripe_roi)
-            fallback = self._fringe_contrast(roi)
-            if result.get("usable_band_count", 0) < 1 or result.get("valid_pair_count", 0) < 3:
-                result.update({
-                    "status": "ok",
-                    "message": "峰谷质量不足，已使用分位数统计估计衬比度；建议重新框选 ROI 或改善照明。",
-                    "method": "percentile_fallback",
-                    "gamma": fallback["gamma"],
-                    "i_max": fallback["i_max"],
-                    "i_min": fallback["i_min"],
-                    "quality_status": "低可信",
-                })
-            else:
-                result.update({
-                    "status": "ok",
-                    "message": "已按多条带峰谷法完成暗场/背景校正衬比度计算。",
-                    "method": "multi_band_peak_valley",
-                })
+            result = self._fft_demodulated_contrast(roi)
+            result.update({
+                "status": "ok",
+                "message": "已按二维傅里叶解调法完成暗场/背景校正衬比度计算。",
+                "method": "fft_demodulation",
+            })
             result.update({
                 "gamma": self._round_digits(result.get("gamma"), 5),
                 "gamma_std": self._round_digits(result.get("gamma_std"), 5),
@@ -320,6 +307,70 @@ class StripeAnalyzer(object):
         if roi:
             return self._crop_roi(gray, roi)
         return self._center_crop(gray)
+
+    def _fft_demodulated_contrast(self, roi):
+        np = self.np
+        image = np.asarray(roi, dtype=np.float32)
+        height, width = image.shape
+        if height < 16 or width < 16:
+            return {"gamma": None, "gamma_std": None, "i_max": None, "i_min": None,
+                    "valid_pair_count": 0, "total_pair_count": 0, "quality_status": "不可用",
+                    "orientation": "--", "profile": []}
+
+        window = np.outer(np.hanning(height), np.hanning(width))
+        spectrum = np.fft.fftshift(np.fft.fft2((image - float(np.mean(image))) * window))
+        magnitude = np.abs(spectrum)
+        cy, cx = height // 2, width // 2
+        magnitude[max(0, cy - 3):min(height, cy + 4), max(0, cx - 3):min(width, cx + 4)] = 0
+        py, px = np.unravel_index(int(np.argmax(magnitude)), magnitude.shape)
+        fy = (py - cy) / float(height)
+        fx = (px - cx) / float(width)
+        if fx < 0:
+            fx, fy = -fx, -fy
+        carrier = float(np.hypot(fx, fy))
+        if carrier <= 1.0 / max(height, width):
+            return {"gamma": None, "gamma_std": None, "i_max": None, "i_min": None,
+                    "valid_pair_count": 0, "total_pair_count": 0, "quality_status": "不可用",
+                    "orientation": "--", "profile": []}
+
+        fy_grid = np.fft.fftfreq(height)[:, None]
+        fx_grid = np.fft.fftfreq(width)[None, :]
+        sigma = max(carrier / 3.5, 1.0 / max(height, width))
+        gaussian = lambda ax, ay: np.exp(-((fx_grid - ax) ** 2 + (fy_grid - ay) ** 2) / (2.0 * sigma ** 2))
+        raw_spectrum = np.fft.fft2(image)
+        carrier_component = np.fft.ifft2(raw_spectrum * gaussian(fx, fy))
+        base = np.real(np.fft.ifft2(raw_spectrum * gaussian(0.0, 0.0)))
+        noise_component = np.fft.ifft2(raw_spectrum * gaussian(-fy, fx))
+        envelope = np.sqrt(np.maximum((2.0 * np.abs(carrier_component)) ** 2 -
+                                      (2.0 * np.abs(noise_component)) ** 2, 0.0))
+        contrast_map = envelope / np.maximum(base, 1e-6)
+        threshold = 0.15 * float(np.percentile(base, 99))
+        mask = np.isfinite(contrast_map) & np.isfinite(base) & (base > threshold)
+        values = np.clip(contrast_map[mask], 0.0, 1.0)
+        if values.size == 0:
+            return {"gamma": None, "gamma_std": None, "i_max": None, "i_min": None,
+                    "valid_pair_count": 0, "total_pair_count": int(contrast_map.size),
+                    "quality_status": "不可用", "orientation": "--", "profile": []}
+
+        gamma = float(np.median(values))
+        q1, q3 = [float(v) for v in np.percentile(values, [25, 75])]
+        gamma_std = (q3 - q1) / 1.349
+        base_level = float(np.median(base[mask]))
+        i_max = base_level * (1.0 + gamma)
+        i_min = base_level * (1.0 - gamma)
+        quality = "良好" if values.size >= 0.25 * contrast_map.size else "低可信"
+        return {
+            "gamma": gamma,
+            "gamma_std": gamma_std,
+            "i_max": i_max,
+            "i_min": i_min,
+            "valid_pair_count": int(values.size),
+            "total_pair_count": int(contrast_map.size),
+            "quality_status": quality,
+            "orientation": round(float(np.degrees(np.arctan2(fy, fx))), 2),
+            "estimated_period_px": round(1.0 / carrier, 3),
+            "profile": [round(float(v), 5) for v in np.percentile(values, np.linspace(0, 100, 21)).tolist()],
+        }
 
     def _profile_fringe_contrast(self, roi, stripe_roi):
         candidates = [
