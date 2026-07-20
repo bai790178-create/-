@@ -176,7 +176,7 @@ class StripeAnalyzer(object):
             result = self._fft_demodulated_contrast(roi)
             result.update({
                 "status": "ok",
-                "message": "已按二维傅里叶解调法完成暗场校正衬比度计算。",
+                "message": "已按二维傅里叶解调法完成暗场/背景校正衬比度计算。",
                 "method": "fft_demodulation",
             })
             result.update({
