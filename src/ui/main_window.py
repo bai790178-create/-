@@ -1099,9 +1099,9 @@ class MainWindow(QMainWindow):
 
         gamma = result.get("gamma")
         if gamma is not None:
-            self.contrast_gamma_label.setText("{:.5f} ({:.2f}%)".format(gamma, gamma * 100.0))
+            self.contrast_gamma_label.setText("{:.4g}".format(gamma))
             gamma_std = result.get("gamma_std")
-            self.contrast_uncertainty_label.setText("--" if gamma_std is None else "± {:.5f} ({:.2f}%)".format(gamma_std, gamma_std * 100.0))
+            self.contrast_uncertainty_label.setText("--" if gamma_std is None else "± {:.4g}".format(gamma_std))
             self.contrast_i_max_label.setText("--" if result.get("i_max") is None else "{:.4f}".format(result.get("i_max")))
             self.contrast_i_min_label.setText("--" if result.get("i_min") is None else "{:.4f}".format(result.get("i_min")))
             self.contrast_roi_label.setText("{} x {}".format(result.get("roi_width"), result.get("roi_height")))
