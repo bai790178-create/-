@@ -3,9 +3,9 @@ import os
 from datetime import datetime
 
 from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
-from PyQt5.QtGui import QImage, QPainter, QPen, QPixmap
+from PyQt5.QtGui import QImage, QKeySequence, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
-    QComboBox,
+    QButtonGroup,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -14,9 +14,12 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QShortcut,
     QSizePolicy,
     QSpinBox,
+    QScrollArea,
     QSplitter,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -27,12 +30,14 @@ from calibration import PIXEL_SCALE_UM_PER_PX
 
 class AnnotationCanvas(QWidget):
     annotation_changed = pyqtSignal()
+    finish_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super(AnnotationCanvas, self).__init__(parent)
         self.setMinimumSize(720, 540)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setCursor(Qt.CrossCursor)
         self.image_pixmap = None
         self.image_size = None
@@ -123,6 +128,7 @@ class AnnotationCanvas(QWidget):
         self.annotation_changed.emit()
 
     def mousePressEvent(self, event):
+        self.setFocus()
         point = self._widget_to_image(event.pos())
         if point is None:
             return
@@ -169,6 +175,12 @@ class AnnotationCanvas(QWidget):
             self.annotation_changed.emit()
             return
         super(AnnotationCanvas, self).mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.finish_requested.emit()
+            return
+        super(AnnotationCanvas, self).keyPressEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -264,12 +276,16 @@ class AnnotationPage(QWidget):
         self.source = "camera"
         self.source_path = ""
         self.sample_id = ""
+        self.shortcuts = []
         self._build_ui()
         self._connect_actions()
+        self._build_shortcuts()
         self._new_sample_id()
         self._update_measurement()
+        self._update_status_controls()
 
     def _build_ui(self):
+        self.setObjectName("annotationPage")
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         splitter = QSplitter(Qt.Horizontal)
@@ -296,6 +312,16 @@ class AnnotationPage(QWidget):
         self.open_camera_btn = QPushButton("打开当前相机")
         self.capture_btn = QPushButton("拍摄定格")
         self.import_btn = QPushButton("导入图片")
+        self.capture_btn.setEnabled(False)
+        self.open_camera_btn.setObjectName("secondaryButton")
+        self.capture_btn.setObjectName("primaryButton")
+        self.import_btn.setObjectName("secondaryButton")
+        self.open_camera_btn.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.capture_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogYesButton))
+        self.import_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
+        self.open_camera_btn.setToolTip("打开主界面当前选择的相机")
+        self.capture_btn.setToolTip("定格当前画面，开始标注")
+        self.import_btn.setToolTip("导入一张原始相机图进行标注")
         capture_row.addWidget(self.open_camera_btn)
         capture_row.addWidget(self.capture_btn)
         capture_row.addWidget(self.import_btn)
@@ -303,6 +329,11 @@ class AnnotationPage(QWidget):
         capture_row_2 = QHBoxLayout()
         self.live_btn = QPushButton("继续预览")
         self.open_annotation_btn = QPushButton("打开已有标注")
+        self.live_btn.setEnabled(False)
+        self.live_btn.setObjectName("ghostButton")
+        self.open_annotation_btn.setObjectName("ghostButton")
+        self.live_btn.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.open_annotation_btn.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         capture_row_2.addWidget(self.live_btn)
         capture_row_2.addWidget(self.open_annotation_btn)
         capture_layout.addLayout(capture_row_2)
@@ -312,31 +343,38 @@ class AnnotationPage(QWidget):
 
         label_group = QGroupBox("样本标签")
         label_form = QFormLayout(label_group)
-        self.status_combo = QComboBox()
-        self.status_combo.addItem("可测量 valid", "valid")
-        self.status_combo.addItem("不确定 uncertain", "uncertain")
-        self.status_combo.addItem("无条纹 no_fringe", "no_fringe")
-        self.stripe_type_combo = QComboBox()
-        self.stripe_type_combo.addItem("亮条纹", "bright")
-        self.stripe_type_combo.addItem("暗条纹", "dark")
-        self.quality_combo = QComboBox()
-        self.quality_combo.addItem("好 good", "good")
-        self.quality_combo.addItem("中 medium", "medium")
-        self.quality_combo.addItem("差 poor", "poor")
+        self.status_group, status_row = self._choice_buttons([
+            ("✓ 可测量", "valid"),
+            ("? 不确定", "uncertain"),
+            ("× 无条纹", "no_fringe"),
+        ], "valid")
+        self.stripe_type_group, stripe_row = self._choice_buttons([
+            ("亮纹中心", "bright"),
+            ("暗纹中心", "dark"),
+        ], "bright")
+        self.quality_group, quality_row = self._choice_buttons([
+            ("清晰", "good"),
+            ("一般", "medium"),
+            ("较差", "poor"),
+        ], "good")
         self.pixel_scale = QLabel("{:.1f} μm/px（固定）".format(PIXEL_SCALE_UM_PER_PX))
-        label_form.addRow("状态", self.status_combo)
-        label_form.addRow("条纹类型", self.stripe_type_combo)
-        label_form.addRow("标注质量", self.quality_combo)
+        label_form.addRow("样本状态", status_row)
+        label_form.addRow("标哪一种", stripe_row)
+        label_form.addRow("图像质量", quality_row)
         label_form.addRow("像素标定", self.pixel_scale)
 
         tools_group = QGroupBox("标注工具")
         tools_layout = QVBoxLayout(tools_group)
         mode_row = QHBoxLayout()
-        self.roi_mode_btn = QPushButton("1. 圈有效 ROI")
-        self.line_mode_btn = QPushButton("2. 标中心线")
+        self.roi_mode_btn = QPushButton("① 圈有效区域")
+        self.line_mode_btn = QPushButton("② 标条纹中心")
         self.roi_mode_btn.setCheckable(True)
         self.line_mode_btn.setCheckable(True)
+        self.roi_mode_btn.setProperty("toolChoice", True)
+        self.line_mode_btn.setProperty("toolChoice", True)
         self.roi_mode_btn.setChecked(True)
+        self.roi_mode_btn.setToolTip("快捷键 R：拖动鼠标圈出可信条纹区域")
+        self.line_mode_btn.setToolTip("快捷键 L：沿一条条纹中心依次点击")
         mode_row.addWidget(self.roi_mode_btn)
         mode_row.addWidget(self.line_mode_btn)
         tools_layout.addLayout(mode_row)
@@ -344,13 +382,19 @@ class AnnotationPage(QWidget):
         order_row.addWidget(QLabel("当前条纹序号"))
         self.next_order = QSpinBox()
         self.next_order.setRange(0, 999)
-        self.finish_line_btn = QPushButton("完成本条")
+        self.finish_line_btn = QPushButton("✓ 完成本条（Enter）")
+        self.finish_line_btn.setObjectName("primaryButton")
+        self.finish_line_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton))
         order_row.addWidget(self.next_order)
         order_row.addWidget(self.finish_line_btn)
         tools_layout.addLayout(order_row)
         edit_row = QHBoxLayout()
-        self.undo_btn = QPushButton("撤销")
-        self.clear_btn = QPushButton("清空标注")
+        self.undo_btn = QPushButton("↶ 撤销（Ctrl+Z）")
+        self.clear_btn = QPushButton("清空全部")
+        self.undo_btn.setObjectName("secondaryButton")
+        self.clear_btn.setObjectName("ghostButton")
+        self.undo_btn.setIcon(self.style().standardIcon(QStyle.SP_ArrowBack))
+        self.clear_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogResetButton))
         edit_row.addWidget(self.undo_btn)
         edit_row.addWidget(self.clear_btn)
         tools_layout.addLayout(edit_row)
@@ -361,18 +405,25 @@ class AnnotationPage(QWidget):
         self.spacing_label = QLabel("--")
         self.uncertainty_label = QLabel("--")
         self.orientation_label = QLabel("--")
+        self.progress_label = QLabel("① 请先拍摄定格或导入一张原图")
+        self.progress_label.setObjectName("annotationProgress")
+        self.progress_label.setWordWrap(True)
         result_form.addRow("已完成中心线", self.line_count_label)
         result_form.addRow("像素间距", self.spacing_label)
         result_form.addRow("拟合不确定度", self.uncertainty_label)
         result_form.addRow("条纹方向", self.orientation_label)
+        result_form.addRow("下一步", self.progress_label)
 
         save_group = QGroupBox("保存")
         save_layout = QVBoxLayout(save_group)
         self.notes = QPlainTextEdit()
         self.notes.setPlaceholderText("可选：记录失焦、过曝、断裂等情况")
         self.notes.setMaximumHeight(70)
-        self.save_btn = QPushButton("保存图像与标注")
+        self.save_btn = QPushButton("④ 保存训练样本（Ctrl+S）")
         self.save_btn.setObjectName("accentButton")
+        self.save_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+        self.save_btn.setMinimumHeight(42)
+        self.save_btn.setEnabled(False)
         self.save_status = QLabel("数据将保存到 annotation_dataset")
         self.save_status.setWordWrap(True)
         save_layout.addWidget(self.notes)
@@ -382,11 +433,16 @@ class AnnotationPage(QWidget):
         for group in (capture_group, label_group, tools_group, result_group, save_group):
             side_layout.addWidget(group)
         side_layout.addStretch(1)
-        splitter.addWidget(side)
+        side_scroll = QScrollArea()
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setMinimumWidth(350)
+        side_scroll.setWidget(side)
+        splitter.addWidget(side_scroll)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([1030, 360])
         root.addWidget(splitter)
+        self._apply_annotation_style()
 
     def _connect_actions(self):
         self.open_camera_btn.clicked.connect(lambda: self.open_camera_requested.emit())
@@ -394,14 +450,79 @@ class AnnotationPage(QWidget):
         self.live_btn.clicked.connect(self.continue_live_preview)
         self.import_btn.clicked.connect(self.import_image)
         self.open_annotation_btn.clicked.connect(self.open_annotation)
-        self.roi_mode_btn.clicked.connect(lambda: self._set_mode("roi"))
-        self.line_mode_btn.clicked.connect(lambda: self._set_mode("centerline"))
+        self.roi_mode_btn.clicked.connect(lambda _checked=False: self._set_mode("roi"))
+        self.line_mode_btn.clicked.connect(lambda _checked=False: self._set_mode("centerline"))
         self.finish_line_btn.clicked.connect(self.finish_current_line)
         self.undo_btn.clicked.connect(self.canvas.undo)
         self.clear_btn.clicked.connect(self.clear_annotation)
         self.save_btn.clicked.connect(self.save_annotation)
         self.canvas.annotation_changed.connect(self._update_measurement)
-        self.status_combo.currentIndexChanged.connect(self._update_status_controls)
+        self.canvas.finish_requested.connect(self.finish_current_line)
+        self.status_group.buttonClicked.connect(self._update_status_controls)
+
+    def _build_shortcuts(self):
+        shortcuts = [
+            ("R", self.canvas, lambda: self._set_mode("roi"), Qt.WidgetShortcut),
+            ("L", self.canvas, lambda: self._set_mode("centerline"), Qt.WidgetShortcut),
+            ("Ctrl+Z", self.canvas, self.canvas.undo, Qt.WidgetShortcut),
+            ("Ctrl+S", self, self.save_annotation, Qt.WidgetWithChildrenShortcut),
+        ]
+        for key, parent, callback, context in shortcuts:
+            shortcut = QShortcut(QKeySequence(key), parent)
+            shortcut.setContext(context)
+            shortcut.activated.connect(callback)
+            self.shortcuts.append(shortcut)
+
+    def _choice_buttons(self, choices, checked_value):
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        for text, value in choices:
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setProperty("choiceButton", True)
+            button.setProperty("value", value)
+            button.setChecked(value == checked_value)
+            button.setMinimumHeight(34)
+            group.addButton(button)
+            layout.addWidget(button)
+        return group, row
+
+    def _apply_annotation_style(self):
+        self.setStyleSheet(
+            """
+            #annotationPage QPushButton[choiceButton="true"],
+            #annotationPage QPushButton[toolChoice="true"] {
+                padding: 7px 9px;
+                border: 1px solid #b8cad1;
+                border-radius: 7px;
+                background: #f7fafb;
+                color: #274955;
+                font-weight: 600;
+            }
+            #annotationPage QPushButton[choiceButton="true"]:hover,
+            #annotationPage QPushButton[toolChoice="true"]:hover {
+                border-color: #2f8fa3;
+                background: #eaf6f8;
+            }
+            #annotationPage QPushButton[choiceButton="true"]:checked,
+            #annotationPage QPushButton[toolChoice="true"]:checked {
+                border: 2px solid #087f8c;
+                background: #d8f2f3;
+                color: #075c65;
+            }
+            #annotationProgress {
+                padding: 8px;
+                border-radius: 6px;
+                background: #eef6f8;
+                color: #24515d;
+                font-weight: 600;
+            }
+            """
+        )
 
     def set_live_frame(self, frame, raw_frame=None):
         self.live_frame = frame
@@ -411,6 +532,8 @@ class AnnotationPage(QWidget):
             if frame is not None:
                 height, width = frame.shape[:2]
                 self.capture_status.setText("实时预览：{} × {}，点击“拍摄定格”后开始标注。".format(width, height))
+                self.capture_btn.setEnabled(True)
+        self._update_progress()
 
     def capture_current_frame(self):
         if self.live_frame is None:
@@ -425,7 +548,10 @@ class AnnotationPage(QWidget):
         self._new_sample_id()
         height, width = self.captured_frame.shape[:2]
         self.capture_status.setText("已定格相机画面：{} × {}。".format(width, height))
+        self.live_btn.setEnabled(self.live_frame is not None)
+        self._set_mode("roi")
         self.message.emit("标注页已拍摄并定格当前帧。")
+        self._update_progress()
 
     def continue_live_preview(self):
         self.captured_frame = None
@@ -434,6 +560,8 @@ class AnnotationPage(QWidget):
         self.canvas.clear_annotation()
         self.canvas.set_frame(self.live_frame)
         self.capture_status.setText("已恢复实时预览。")
+        self.live_btn.setEnabled(False)
+        self._update_progress()
 
     def import_image(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -457,6 +585,9 @@ class AnnotationPage(QWidget):
         self._new_sample_id()
         height, width = frame.shape[:2]
         self.capture_status.setText("已导入：{}（{} × {}）".format(os.path.basename(path), width, height))
+        self.live_btn.setEnabled(self.live_frame is not None)
+        self._set_mode("roi")
+        self._update_progress()
 
     def open_annotation(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -486,13 +617,15 @@ class AnnotationPage(QWidget):
             self.sample_id = data.get("sample_id") or os.path.basename(os.path.dirname(path))
             self.canvas.set_frame(frame)
             self.canvas.set_annotation(data.get("roi"), data.get("centerlines"))
-            self._select_data(self.status_combo, data.get("status", "valid"))
-            self._select_data(self.stripe_type_combo, data.get("stripe_type", "bright"))
-            self._select_data(self.quality_combo, data.get("label_quality", "good"))
+            self._set_group_value(self.status_group, data.get("status", "valid"))
+            self._set_group_value(self.stripe_type_group, data.get("stripe_type", "bright"))
+            self._set_group_value(self.quality_group, data.get("label_quality", "good"))
             self.notes.setPlainText(data.get("notes", ""))
             next_order = max([int(line["order"]) for line in self.canvas.centerlines] or [-1]) + 1
             self.next_order.setValue(next_order)
             self.capture_status.setText("已打开标注：{}".format(self.sample_id))
+            self.live_btn.setEnabled(self.live_frame is not None)
+            self._update_status_controls()
             self._update_measurement()
         except Exception as exc:
             QMessageBox.warning(self, "打开失败", str(exc))
@@ -515,8 +648,8 @@ class AnnotationPage(QWidget):
         if frame is None:
             QMessageBox.information(self, "没有定格图像", "请先拍摄定格或导入一张图片。")
             return
-        status = self.status_combo.currentData()
-        if self.canvas.current_points:
+        status = self._group_value(self.status_group, "valid")
+        if status != "no_fringe" and self.canvas.current_points:
             QMessageBox.information(self, "中心线未完成", "请先点击“完成本条”，或撤销当前未完成中心线。")
             return
         if status == "valid":
@@ -527,7 +660,9 @@ class AnnotationPage(QWidget):
                 QMessageBox.information(self, "中心线不足", "可测量样本至少标注4条同类型条纹中心线，建议6～10条。")
                 return
 
-        measurement = estimate_spacing(self.canvas.centerlines)
+        saved_roi = None if status == "no_fringe" else self.canvas.roi
+        saved_centerlines = [] if status == "no_fringe" else self.canvas.centerlines
+        measurement = estimate_spacing(saved_centerlines)
         if status == "valid" and measurement is None:
             QMessageBox.warning(self, "无法计算间距", "当前中心线无法形成有效间距，请检查序号和标注位置。")
             return
@@ -552,12 +687,12 @@ class AnnotationPage(QWidget):
             "raw_image": raw_image_name,
             "resolution": [width, height],
             "status": status,
-            "stripe_type": self.stripe_type_combo.currentData(),
-            "label_quality": self.quality_combo.currentData(),
+            "stripe_type": self._group_value(self.stripe_type_group, "bright"),
+            "label_quality": self._group_value(self.quality_group, "good"),
             "pixel_scale_um_per_px": pixel_scale,
             "pixel_scale_fixed": True,
-            "roi": self.canvas.roi,
-            "centerlines": self.canvas.centerlines,
+            "roi": saved_roi,
+            "centerlines": saved_centerlines,
             "measurement": measurement,
             "spacing_um": (
                 round(float(measurement["spacing_px"]) * pixel_scale, 4)
@@ -577,13 +712,17 @@ class AnnotationPage(QWidget):
         QMessageBox.information(self, "保存成功", "图像与标注已保存到：\n{}".format(sample_dir))
 
     def _set_mode(self, mode):
+        if self.captured_frame is None or self._group_value(self.status_group, "valid") == "no_fringe":
+            return
         self.canvas.set_mode(mode)
+        self.canvas.setFocus()
         self.roi_mode_btn.setChecked(mode == "roi")
         self.line_mode_btn.setChecked(mode == "centerline")
         if mode == "roi":
             self.canvas_help.setText("按住左键拖动，圈出条纹清晰、可用于测量的区域。")
         else:
             self.canvas_help.setText("沿同一种条纹中心左键点击至少两个点，然后点击“完成本条”。")
+        self._update_status_controls()
 
     def _update_measurement(self):
         self.line_count_label.setText(str(len(self.canvas.centerlines)))
@@ -593,22 +732,54 @@ class AnnotationPage(QWidget):
             self.spacing_label.setText(str(exc))
             self.uncertainty_label.setText("--")
             self.orientation_label.setText("--")
+            self._update_status_controls()
             return
         if measurement is None:
             self.spacing_label.setText("--")
             self.uncertainty_label.setText("--")
             self.orientation_label.setText("--")
+            self._update_status_controls()
             return
         self.spacing_label.setText("{:.3f} px".format(measurement["spacing_px"]))
         self.uncertainty_label.setText("± {:.3f} px".format(measurement["spacing_uncertainty_px"]))
         self.orientation_label.setText("{:.2f}°".format(measurement["orientation_deg"]))
+        self._update_status_controls()
 
-    def _update_status_controls(self):
-        enabled = self.status_combo.currentData() != "no_fringe"
-        self.stripe_type_combo.setEnabled(enabled)
+    def _update_status_controls(self, *_args):
+        status = self._group_value(self.status_group, "valid")
+        enabled = self.captured_frame is not None and status != "no_fringe"
+        for button in self.stripe_type_group.buttons():
+            button.setEnabled(enabled)
         self.roi_mode_btn.setEnabled(enabled)
         self.line_mode_btn.setEnabled(enabled)
-        self.finish_line_btn.setEnabled(enabled)
+        self.finish_line_btn.setEnabled(enabled and self.canvas.mode == "centerline")
+        self.undo_btn.setEnabled(enabled and bool(self.canvas.current_points or self.canvas.centerlines or self.canvas.roi))
+        self.clear_btn.setEnabled(enabled and bool(self.canvas.current_points or self.canvas.centerlines or self.canvas.roi))
+        self._update_progress()
+
+    def _update_progress(self):
+        status = self._group_value(self.status_group, "valid")
+        ready = False
+        if self.captured_frame is None:
+            text = "① 请先拍摄定格或导入一张原图"
+        elif status == "no_fringe":
+            text = "✓ 负样本无需画线，可以直接保存"
+            ready = True
+        elif status == "uncertain":
+            text = "可选：圈出疑似区域或标出可见中心线，然后保存"
+            ready = not self.canvas.current_points
+        elif not self.canvas.roi:
+            text = "② 点击“圈有效区域”，拖动鼠标框选条纹"
+        elif self.canvas.current_points:
+            text = "③ 当前中心线尚未完成，请点击“完成本条”"
+        elif len(self.canvas.centerlines) < 4:
+            text = "③ 已完成 {}/4 条，建议最终标6～10条".format(len(self.canvas.centerlines))
+        else:
+            text = "✓ 标注完整，可以保存；当前共{}条中心线".format(len(self.canvas.centerlines))
+            ready = True
+        self.progress_label.setText(text)
+        self.save_btn.setEnabled(ready)
+        self.save_btn.setToolTip(text)
 
     def _new_sample_id(self):
         self.sample_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -640,8 +811,12 @@ class AnnotationPage(QWidget):
         except Exception as exc:
             raise RuntimeError("保存标注图像失败：{}".format(exc))
 
-    def _select_data(self, combo, value):
-        for index in range(combo.count()):
-            if combo.itemData(index) == value:
-                combo.setCurrentIndex(index)
+    def _group_value(self, group, default=None):
+        button = group.checkedButton()
+        return button.property("value") if button is not None else default
+
+    def _set_group_value(self, group, value):
+        for button in group.buttons():
+            if button.property("value") == value:
+                button.setChecked(True)
                 return
