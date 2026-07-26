@@ -11,6 +11,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from analysis.stripe_analyzer import StripeAnalyzer
+from calibration import PIXEL_SCALE_UM_PER_PX
 from camera.picture_settings import (
     apply_picture_settings,
     default_picture_settings,
@@ -56,6 +57,16 @@ class PictureSettingsTests(unittest.TestCase):
         before = analyzer.analyze_frame(frame, {"pixel_scale": 1.0})
         after = analyzer.analyze_frame(adjusted, {"pixel_scale": 1.0})
         self.assertEqual(vars(before), vars(after))
+
+    def test_stripe_measurement_uses_fixed_pixel_scale(self):
+        analyzer = StripeAnalyzer()
+        result = analyzer.analyze_frame(stripe_frame(), {"pixel_scale": 0.65})
+        self.assertIsNotNone(result.stripe_spacing_px)
+        self.assertAlmostEqual(
+            result.stripe_spacing_um,
+            result.stripe_spacing_px * PIXEL_SCALE_UM_PER_PX,
+            delta=0.002,
+        )
 
     def test_neutral_pipeline_keeps_contrast_measurement(self):
         analyzer = StripeAnalyzer()

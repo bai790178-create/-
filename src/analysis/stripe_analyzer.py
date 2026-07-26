@@ -1,6 +1,8 @@
 import math
 import os
 
+from calibration import PIXEL_SCALE_UM_PER_PX
+
 
 class AnalysisResult(object):
     def __init__(
@@ -231,7 +233,7 @@ class StripeAnalyzer(object):
             return AnalysisResult(status="no_image", message="没有可分析图像。")
 
         options = options or {}
-        pixel_scale = float(options.get("pixel_scale") or 1.0)
+        pixel_scale = PIXEL_SCALE_UM_PER_PX
         roi = options.get("roi")
         cv2 = self.cv2
         np = self.np

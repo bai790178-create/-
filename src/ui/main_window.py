@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
 )
 
 from analysis.stripe_analyzer import StripeAnalyzer
+from calibration import PIXEL_SCALE_UM_PER_PX
 from camera.camera_worker import BACKEND_NAMES, CameraWorker, discover_cameras
 from camera.picture_settings import apply_picture_settings, normalize_picture_settings
 from storage.experiment_store import ExperimentStore
@@ -496,7 +497,9 @@ class MainWindow(QMainWindow):
         form.setVerticalSpacing(10)
         self.analysis_type = QComboBox()
         self.analysis_type.addItems(["光栅条纹分析", "频率稳定性估算", "材料状态评估"])
-        self.pixel_scale = QLineEdit("0.65")
+        self.pixel_scale = QLineEdit(str(PIXEL_SCALE_UM_PER_PX))
+        self.pixel_scale.setReadOnly(True)
+        self.pixel_scale.setToolTip("相机参数固定，像素当量统一为 2.0 μm/px。")
         self.material = QComboBox()
         self.material.addItems(["明胶", "琼脂", "卡拉胶", "结冷胶"])
         self.concentration = QLineEdit("4.0")
@@ -511,7 +514,7 @@ class MainWindow(QMainWindow):
         self.clear_roi_btn.setObjectName("secondaryButton")
         self._decorate_button(self.clear_roi_btn, QStyle.SP_DialogResetButton)
         form.addRow("分析类型", self.analysis_type)
-        form.addRow("像素当量 (um/px)", self.pixel_scale)
+        form.addRow("像素当量 (μm/px，固定)", self.pixel_scale)
         form.addRow("分析 ROI", self.roi_label)
         form.addRow("", self.clear_roi_btn)
         form.addRow("材料类型", self.material)
@@ -1249,8 +1252,7 @@ class MainWindow(QMainWindow):
         return result
 
     def _round_result_um(self, spacing_px):
-        pixel_scale = self._float_value(self.pixel_scale.text(), 1.0)
-        return round(float(spacing_px) * pixel_scale, 3)
+        return round(float(spacing_px) * PIXEL_SCALE_UM_PER_PX, 3)
 
     def save_contrast_result(self):
         if not self.contrast_result or self.contrast_result.get("gamma") is None:
@@ -1403,7 +1405,7 @@ class MainWindow(QMainWindow):
             self._reset_realtime_smoothing()
 
     def _analysis_options(self):
-        options = {"pixel_scale": self._float_value(self.pixel_scale.text(), 1.0)}
+        options = {"pixel_scale": PIXEL_SCALE_UM_PER_PX}
         if self.current_roi:
             options["roi"] = self.current_roi
         return options
@@ -1411,7 +1413,7 @@ class MainWindow(QMainWindow):
     def _params(self):
         return {
             "analysis_type": self.analysis_type.currentText(),
-            "pixel_scale": self._float_value(self.pixel_scale.text(), 1.0),
+            "pixel_scale": PIXEL_SCALE_UM_PER_PX,
             "material": self.material.currentText(),
             "concentration": self._float_value(self.concentration.text(), 0.0),
             "frequency_mhz": self._float_value(self.frequency.text(), 0.0),

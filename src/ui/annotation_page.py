@@ -6,7 +6,6 @@ from PyQt5.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -23,6 +22,7 @@ from PyQt5.QtWidgets import (
 )
 
 from annotation.fringe_annotation import estimate_spacing
+from calibration import PIXEL_SCALE_UM_PER_PX
 
 
 class AnnotationCanvas(QWidget):
@@ -323,11 +323,7 @@ class AnnotationPage(QWidget):
         self.quality_combo.addItem("好 good", "good")
         self.quality_combo.addItem("中 medium", "medium")
         self.quality_combo.addItem("差 poor", "poor")
-        self.pixel_scale = QDoubleSpinBox()
-        self.pixel_scale.setRange(0.0001, 100000.0)
-        self.pixel_scale.setDecimals(4)
-        self.pixel_scale.setValue(1.0)
-        self.pixel_scale.setSuffix(" μm/px")
+        self.pixel_scale = QLabel("{:.1f} μm/px（固定）".format(PIXEL_SCALE_UM_PER_PX))
         label_form.addRow("状态", self.status_combo)
         label_form.addRow("条纹类型", self.stripe_type_combo)
         label_form.addRow("标注质量", self.quality_combo)
@@ -406,7 +402,6 @@ class AnnotationPage(QWidget):
         self.save_btn.clicked.connect(self.save_annotation)
         self.canvas.annotation_changed.connect(self._update_measurement)
         self.status_combo.currentIndexChanged.connect(self._update_status_controls)
-        self.pixel_scale.valueChanged.connect(self._update_measurement)
 
     def set_live_frame(self, frame, raw_frame=None):
         self.live_frame = frame
@@ -494,7 +489,6 @@ class AnnotationPage(QWidget):
             self._select_data(self.status_combo, data.get("status", "valid"))
             self._select_data(self.stripe_type_combo, data.get("stripe_type", "bright"))
             self._select_data(self.quality_combo, data.get("label_quality", "good"))
-            self.pixel_scale.setValue(float(data.get("pixel_scale_um_per_px") or 1.0))
             self.notes.setPlainText(data.get("notes", ""))
             next_order = max([int(line["order"]) for line in self.canvas.centerlines] or [-1]) + 1
             self.next_order.setValue(next_order)
@@ -547,7 +541,7 @@ class AnnotationPage(QWidget):
             raw_image_name = "raw.png"
             self._write_image(os.path.join(sample_dir, raw_image_name), self.captured_raw_frame)
         height, width = frame.shape[:2]
-        pixel_scale = float(self.pixel_scale.value())
+        pixel_scale = PIXEL_SCALE_UM_PER_PX
         annotation = {
             "schema_version": 1,
             "sample_id": os.path.basename(sample_dir),
@@ -561,6 +555,7 @@ class AnnotationPage(QWidget):
             "stripe_type": self.stripe_type_combo.currentData(),
             "label_quality": self.quality_combo.currentData(),
             "pixel_scale_um_per_px": pixel_scale,
+            "pixel_scale_fixed": True,
             "roi": self.canvas.roi,
             "centerlines": self.canvas.centerlines,
             "measurement": measurement,
