@@ -152,6 +152,16 @@ def _configure_sdk(dll):
     dll.CameraGetImageBufferEx.restype = ctypes.c_void_p
     dll.CameraUnInit.argtypes = [ctypes.c_void_p]
     dll.CameraUnInit.restype = ctypes.c_int
+    dll.CameraSetAeState.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    dll.CameraSetAeState.restype = ctypes.c_int
+    dll.CameraSetExposureTime.argtypes = [ctypes.c_void_p, ctypes.c_double]
+    dll.CameraSetExposureTime.restype = ctypes.c_int
+    dll.CameraSetAnalogGain.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    dll.CameraSetAnalogGain.restype = ctypes.c_int
+    dll.CameraSetWbMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    dll.CameraSetWbMode.restype = ctypes.c_int
+    dll.CameraShowSettingPage.argtypes = [ctypes.c_void_p]
+    dll.CameraShowSettingPage.restype = ctypes.c_int
 
 
 def discover_ck_cameras():
@@ -223,6 +233,19 @@ class CKCameraCapture(object):
         else:
             frame = data.reshape((height, width))
         return True, frame
+
+    def apply_settings(self, settings):
+        if self.dll is None or not self.handle:
+            return
+        self.dll.CameraSetAeState(self.handle, int(bool(settings["auto_exposure"])))
+        if not settings["auto_exposure"]:
+            self.dll.CameraSetExposureTime(self.handle, float(settings["exposure_time_ms"]) * 1000.0)
+        self.dll.CameraSetAnalogGain(self.handle, int(round(settings["gain"])))
+        self.dll.CameraSetWbMode(self.handle, int(bool(settings["auto_balance"])))
+
+    def show_settings(self):
+        if self.dll is not None and self.handle:
+            self.dll.CameraShowSettingPage(self.handle)
 
     def close(self):
         if self.dll is not None and self.handle:

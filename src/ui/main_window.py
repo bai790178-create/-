@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from collections import deque
 
-from PyQt5.QtCore import QRect, Qt, pyqtSignal
+from PyQt5.QtCore import QRect, QSettings, Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QAction,
@@ -30,7 +30,9 @@ from PyQt5.QtWidgets import (
 
 from analysis.stripe_analyzer import StripeAnalyzer
 from camera.camera_worker import BACKEND_NAMES, CameraWorker, discover_cameras
+from camera.picture_settings import apply_picture_settings, normalize_picture_settings
 from storage.experiment_store import ExperimentStore
+from ui.picture_settings_page import PictureSettingsPage
 
 
 class RoiPreviewLabel(QLabel):
@@ -161,6 +163,7 @@ class MainWindow(QMainWindow):
         self.store = ExperimentStore(self.experiments_dir)
         self.camera_worker = None
         self.accept_camera_frames = False
+        self.current_camera_raw_frame = None
         self.current_frame = None
         self.current_result = None
         self.realtime_enabled = False
@@ -180,6 +183,9 @@ class MainWindow(QMainWindow):
         self.last_contrast_analysis_ms = 0
         self.current_roi = None
         self.updating_roi = False
+        self.picture_settings_path = os.path.join(project_root, "saved_states", "picture_settings.ini")
+        self.picture_settings = self._load_picture_settings()
+        self.picture_processing_error_logged = False
 
         self.setWindowTitle("超声光栅实验辅助平台")
         self.resize(1420, 900)
@@ -199,11 +205,13 @@ class MainWindow(QMainWindow):
         root.setSpacing(14)
         root.addWidget(self._build_titlebar())
 
-        tabs = QTabWidget()
-        tabs.setObjectName("mainTabs")
-        tabs.addTab(self._build_analysis_page(), "条纹分析")
-        tabs.addTab(self._build_contrast_page(), "衬比度计算")
-        root.addWidget(tabs, 1)
+        self.main_tabs = QTabWidget()
+        self.main_tabs.setObjectName("mainTabs")
+        self.main_tabs.addTab(self._build_analysis_page(), "条纹分析")
+        self.main_tabs.addTab(self._build_contrast_page(), "衬比度计算")
+        self.picture_settings_page = PictureSettingsPage(self.picture_settings)
+        self.main_tabs.addTab(self.picture_settings_page, "画面设置")
+        root.addWidget(self.main_tabs, 1)
         self.setCentralWidget(central)
         self._build_menu()
 
@@ -581,6 +589,14 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(QApplication.quit)
         file_menu.addAction(quit_action)
 
+        camera_menu = self.menuBar().addMenu("相机")
+        picture_action = QAction("画面设置", self)
+        picture_action.triggered.connect(lambda: self.main_tabs.setCurrentWidget(self.picture_settings_page))
+        camera_menu.addAction(picture_action)
+        driver_action = QAction("相机驱动高级设置", self)
+        driver_action.triggered.connect(self.open_driver_settings)
+        camera_menu.addAction(driver_action)
+
     def _connect_actions(self):
         self.open_camera_btn.clicked.connect(self.open_camera)
         self.stop_camera_btn.clicked.connect(self.stop_camera)
@@ -600,6 +616,8 @@ class MainWindow(QMainWindow):
         self.realtime_contrast_btn.clicked.connect(self.toggle_realtime_contrast)
         self.save_contrast_btn.clicked.connect(self.save_contrast_result)
         self.clear_contrast_btn.clicked.connect(self.clear_contrast)
+        self.picture_settings_page.settings_changed.connect(self.on_picture_settings_changed)
+        self.picture_settings_page.driver_settings_requested.connect(self.open_driver_settings)
 
     def _decorate_button(self, button, standard_pixmap):
         button.setIcon(self.style().standardIcon(standard_pixmap))
@@ -682,14 +700,14 @@ class MainWindow(QMainWindow):
             QSplitter::handle:horizontal {
                 width: 8px;
             }
-            QLineEdit, QComboBox, QPlainTextEdit {
+            QLineEdit, QComboBox, QPlainTextEdit, QSpinBox, QDoubleSpinBox {
                 background: #fbfdff;
                 border: 1px solid #b9cbd1;
                 border-radius: 6px;
                 padding: 7px 8px;
                 selection-background-color: #20a6b8;
             }
-            QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {
+            QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {
                 border: 1px solid #20a6b8;
                 background: #ffffff;
             }
@@ -797,7 +815,9 @@ class MainWindow(QMainWindow):
         self.camera_worker = CameraWorker()
         self.camera_worker.frame_ready.connect(self.on_frame_ready)
         self.camera_worker.camera_error.connect(self.on_camera_error)
-        self.camera_worker.start(camera_index, backend_name)
+        self.camera_worker.settings_message.connect(self._log)
+        self.camera_worker.start(camera_index, backend_name, self.picture_settings)
+        self.picture_settings_page.set_camera_connected(True)
         self.camera_status.setText("相机状态：连接中")
         self._log("正在打开 USB 相机 {}（{}）。".format(camera_index, BACKEND_NAMES.get(backend_name, backend_name)))
 
@@ -846,6 +866,8 @@ class MainWindow(QMainWindow):
         if self.camera_worker:
             self.camera_worker.stop()
             self.camera_worker = None
+        self.current_camera_raw_frame = None
+        self.picture_settings_page.set_camera_connected(False)
         self.camera_status.setText("相机状态：已关闭")
         self.realtime_enabled = False
         self.contrast_realtime_enabled = False
@@ -859,11 +881,13 @@ class MainWindow(QMainWindow):
         try:
             if not self.accept_camera_frames:
                 return
-            self.current_frame = frame
+            self.current_camera_raw_frame = frame
+            self.current_frame = self._apply_camera_picture_settings(frame)
             self.camera_status.setText("相机状态：实时预览")
-            self._show_frame(frame)
+            self._show_frame(self.current_frame)
             if hasattr(self, "contrast_original_preview_label"):
-                self._show_frame_on_label(frame, self.contrast_original_preview_label)
+                self._show_frame_on_label(self.current_frame, self.contrast_original_preview_label)
+            self._show_frame_on_label(self.current_frame, self.picture_settings_page.preview_label)
             if self.realtime_enabled:
                 ms = int(datetime.now().timestamp() * 1000)
                 if ms - self.last_analysis_ms >= 400:
@@ -873,13 +897,14 @@ class MainWindow(QMainWindow):
                 ms = int(datetime.now().timestamp() * 1000)
                 if ms - self.last_contrast_analysis_ms >= 500:
                     self.last_contrast_analysis_ms = ms
-                    self.analyze_realtime_contrast(frame)
+                    self.analyze_realtime_contrast(self.current_frame)
         finally:
             if hasattr(worker, "mark_frame_consumed"):
                 worker.mark_frame_consumed()
 
     def on_camera_error(self, message):
         self.camera_status.setText("相机状态：错误")
+        self.picture_settings_page.set_camera_connected(False)
         self._log(message)
         QMessageBox.warning(self, "相机错误", message)
 
@@ -904,6 +929,7 @@ class MainWindow(QMainWindow):
 
     def _load_image_path(self, path):
         self.accept_camera_frames = False
+        self.current_camera_raw_frame = None
         if self.camera_worker and self.camera_worker.isRunning():
             self.stop_camera()
         self.current_frame = self.analyzer.read_image(path)
@@ -1387,6 +1413,7 @@ class MainWindow(QMainWindow):
             "duration_min": self._float_value(self.duration.text(), 0.0),
             "camera_index": self.camera_select.currentData(),
             "camera_backend": self.backend_select.currentData(),
+            "picture_settings": dict(self.picture_settings),
             "roi": self.current_roi,
             "notes": self.notes.toPlainText(),
         }
@@ -1396,6 +1423,49 @@ class MainWindow(QMainWindow):
             return float(text)
         except Exception:
             return default
+
+    def _load_picture_settings(self):
+        defaults = normalize_picture_settings(None)
+        settings = QSettings(self.picture_settings_path, QSettings.IniFormat)
+        loaded = {}
+        for key, default in defaults.items():
+            value_type = bool if isinstance(default, bool) else int if isinstance(default, int) else float
+            loaded[key] = settings.value(key, default, type=value_type)
+        return normalize_picture_settings(loaded)
+
+    def _save_picture_settings(self):
+        os.makedirs(os.path.dirname(self.picture_settings_path), exist_ok=True)
+        settings = QSettings(self.picture_settings_path, QSettings.IniFormat)
+        for key, value in self.picture_settings.items():
+            settings.setValue(key, value)
+        settings.sync()
+
+    def on_picture_settings_changed(self, settings):
+        self.picture_settings = normalize_picture_settings(settings)
+        self._save_picture_settings()
+        self.picture_processing_error_logged = False
+        if self.camera_worker and self.camera_worker.isRunning():
+            self.camera_worker.update_settings(self.picture_settings)
+        if self.current_camera_raw_frame is not None:
+            self.current_frame = self._apply_camera_picture_settings(self.current_camera_raw_frame)
+            self._show_frame(self.current_frame)
+            self._show_frame_on_label(self.current_frame, self.contrast_original_preview_label)
+            self._show_frame_on_label(self.current_frame, self.picture_settings_page.preview_label)
+
+    def open_driver_settings(self):
+        if not self.camera_worker or not self.camera_worker.isRunning():
+            self._log("请先打开相机，再进入相机驱动高级设置。")
+            return
+        self.camera_worker.open_driver_settings()
+
+    def _apply_camera_picture_settings(self, frame):
+        try:
+            return apply_picture_settings(frame, self.picture_settings)
+        except Exception as exc:
+            if not self.picture_processing_error_logged:
+                self._log("画面参数处理失败，已保留原始帧：{}".format(exc))
+                self.picture_processing_error_logged = True
+            return frame
 
     def _log(self, message):
         self.log_view.appendPlainText("[{}] {}".format(datetime.now().strftime("%H:%M:%S"), message))
