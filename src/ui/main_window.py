@@ -32,6 +32,7 @@ from analysis.stripe_analyzer import StripeAnalyzer
 from camera.camera_worker import BACKEND_NAMES, CameraWorker, discover_cameras
 from camera.picture_settings import apply_picture_settings, normalize_picture_settings
 from storage.experiment_store import ExperimentStore
+from ui.annotation_page import AnnotationPage
 from ui.picture_settings_page import PictureSettingsPage
 
 
@@ -209,6 +210,8 @@ class MainWindow(QMainWindow):
         self.main_tabs.setObjectName("mainTabs")
         self.main_tabs.addTab(self._build_analysis_page(), "条纹分析")
         self.main_tabs.addTab(self._build_contrast_page(), "衬比度计算")
+        self.annotation_page = AnnotationPage(self.project_root, params_provider=self._params)
+        self.main_tabs.addTab(self.annotation_page, "数据采集与标注")
         self.picture_settings_page = PictureSettingsPage(self.picture_settings)
         self.main_tabs.addTab(self.picture_settings_page, "画面设置")
         root.addWidget(self.main_tabs, 1)
@@ -618,6 +621,8 @@ class MainWindow(QMainWindow):
         self.clear_contrast_btn.clicked.connect(self.clear_contrast)
         self.picture_settings_page.settings_changed.connect(self.on_picture_settings_changed)
         self.picture_settings_page.driver_settings_requested.connect(self.open_driver_settings)
+        self.annotation_page.open_camera_requested.connect(self.open_camera)
+        self.annotation_page.message.connect(self._log)
 
     def _decorate_button(self, button, standard_pixmap):
         button.setIcon(self.style().standardIcon(standard_pixmap))
@@ -888,6 +893,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "contrast_original_preview_label"):
                 self._show_frame_on_label(self.current_frame, self.contrast_original_preview_label)
             self._show_frame_on_label(self.current_frame, self.picture_settings_page.preview_label)
+            self.annotation_page.set_live_frame(self.current_frame, self.current_camera_raw_frame)
             if self.realtime_enabled:
                 ms = int(datetime.now().timestamp() * 1000)
                 if ms - self.last_analysis_ms >= 400:
