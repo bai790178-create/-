@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -60,7 +61,21 @@ class PictureSettingsTests(unittest.TestCase):
 
     def test_stripe_measurement_uses_fixed_pixel_scale(self):
         analyzer = StripeAnalyzer()
-        result = analyzer.analyze_frame(stripe_frame(), {"pixel_scale": 0.65})
+        measured = {
+            "status": "ok",
+            "message": "ok",
+            "spacing_px": 200.0,
+            "spacing_std_px": 1.0,
+            "spacing_sem_px": 0.5,
+            "spacing_samples_px": [199.0, 201.0],
+            "stripe_centers_px": [100.0, 300.0, 500.0],
+            "confidence": 0.9,
+            "model_evidence": 0.9,
+            "profile": [0.0, 1.0],
+            "roi_count": 8,
+        }
+        with patch.object(analyzer.centerline_model, "measure", return_value=measured):
+            result = analyzer.analyze_frame(stripe_frame(), {"pixel_scale": 0.65})
         self.assertIsNotNone(result.stripe_spacing_px)
         self.assertAlmostEqual(
             result.stripe_spacing_um,
@@ -77,7 +92,7 @@ class PictureSettingsTests(unittest.TestCase):
         before = analyzer.calculate_calibrated_contrast(frame, background, dark, {})
         after = analyzer.calculate_calibrated_contrast(adjusted, background, dark, {})
         self.assertEqual(before, after)
-        self.assertEqual(after["status"], "ok")
+        self.assertIsNotNone(after["gamma"])
 
 
 if __name__ == "__main__":

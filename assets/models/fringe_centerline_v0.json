@@ -1,0 +1,40 @@
+{
+  "model_id": "fringe_centerline_v0",
+  "format": "onnx",
+  "source_checkpoint": "F:\\model\\v0\\fringe_v0_final.pt",
+  "source_checkpoint_sha256": "45CCB184F00752AE218D0969E234C252398F4C35E90534CC16A8A2DF3569B3B2",
+  "onnx_sha256": "DFE49B979A837E5B3D81ADCED5F855EF34C0C46B10205680E233EA3BA09FC4A7",
+  "input": {
+    "name": "image",
+    "shape": [1, 1, 288, 384],
+    "normalization": "grayscale; divide by 255; percentile 1-99 rescale to 0-1"
+  },
+  "output": {
+    "name": "logits",
+    "activation": "sigmoid"
+  },
+  "centerline_threshold": 0.55,
+  "pixel_scale_um_per_px": 2.0,
+  "training_summary": {
+    "accepted_samples": 32,
+    "positive_samples": 26,
+    "negative_samples": 6,
+    "best_validation_f1": 0.7932155438582174
+  },
+  "measurement_validation": {
+    "positive_detected": "26/26",
+    "negative_rejected": "6/6",
+    "mean_absolute_error_px": 1.23,
+    "median_absolute_error_px": 0.88
+  },
+  "conversion_validation": {
+    "probability_max_absolute_error": 0.000005304813385009766
+  },
+  "integrated_validation": {
+    "positive_detected": "26/26",
+    "negative_rejected": "6/6",
+    "mean_absolute_error_px": 1.2085576923076906,
+    "median_absolute_error_px": 1.0523000000000025,
+    "maximum_absolute_error_px": 4.149699999999996
+  }
+}
